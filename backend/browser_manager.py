@@ -6,6 +6,7 @@ BrowserManager - Playwright Chrome 浏览器管理器
 import base64
 from playwright.async_api import async_playwright
 from logger import get_logger
+from fingerprint import random_fingerprint
 
 log = get_logger('browser')
 
@@ -33,6 +34,7 @@ class BrowserManager:
 
         self._playwright = await async_playwright().start()
 
+        fp = random_fingerprint()
         launch_args = {
             'user_data_dir': user_data_dir,
             'headless': headless,
@@ -41,7 +43,12 @@ class BrowserManager:
                 '--no-first-run',
                 '--no-default-browser-check',
             ],
-            'viewport': {'width': 1280, 'height': 800},
+            'viewport': fp['viewport'],
+            'user_agent': fp['user_agent'],
+            'locale': fp['locale'],
+            'timezone_id': fp['timezone_id'],
+            'color_scheme': fp['color_scheme'],
+            'device_scale_factor': fp['device_scale_factor'],
         }
 
         # 如果指定了 Chrome 路径

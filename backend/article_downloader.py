@@ -16,6 +16,7 @@ from docx import Document
 from docx.shared import Inches, Pt
 from docx.oxml.ns import qn
 from logger import get_logger
+from fingerprint import random_fingerprint
 
 log = get_logger('downloader')
 
@@ -294,6 +295,7 @@ async def fetch_article_elements(article_url, headless=True):
     """
     log.info(f'提取文章内容: {article_url} (headless={headless})')
 
+    fp = random_fingerprint()
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
         headless=headless,
@@ -306,9 +308,13 @@ async def fetch_article_elements(article_url, headless=True):
 
     try:
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 900},
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            locale='zh-CN',
+            viewport=fp['viewport'],
+            user_agent=fp['user_agent'],
+            locale=fp['locale'],
+            timezone_id=fp['timezone_id'],
+            color_scheme=fp['color_scheme'],
+            device_scale_factor=fp['device_scale_factor'],
+            extra_http_headers=fp['extra_http_headers'],
         )
         page = await context.new_page()
 

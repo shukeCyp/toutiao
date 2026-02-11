@@ -93,6 +93,13 @@
           </div>
           <input class="input setting-input" type="number" v-model.number="settings.collectTimeout" />
         </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label">改写线程数</label>
+            <span class="setting-desc">批量改写文章的并行线程数，默认 10</span>
+          </div>
+          <input class="input setting-input" type="number" v-model.number="settings.rewriteWorkers" />
+        </div>
       </div>
 
       <div class="actions">
@@ -115,6 +122,7 @@ const defaultSettings = {
   headless: false,
   timeout: 30000,
   collectTimeout: 60,
+  rewriteWorkers: 10,
   apiBase: '',
   apiKey: '',
   model: '',

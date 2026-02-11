@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 from playwright.async_api import async_playwright
 from logger import get_logger
+from fingerprint import random_fingerprint
 
 log = get_logger('collector')
 
@@ -139,6 +140,7 @@ class ToutiaoClient:
             await self.close()
 
         self._playwright = await async_playwright().start()
+        fp = random_fingerprint()
         self._browser = await self._playwright.chromium.launch(
             headless=headless,
             args=[
@@ -150,10 +152,13 @@ class ToutiaoClient:
             ],
         )
         self._context = await self._browser.new_context(
-            viewport={'width': 1280, 'height': 900},
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            locale='zh-CN',
-            timezone_id='Asia/Shanghai',
+            viewport=fp['viewport'],
+            user_agent=fp['user_agent'],
+            locale=fp['locale'],
+            timezone_id=fp['timezone_id'],
+            color_scheme=fp['color_scheme'],
+            device_scale_factor=fp['device_scale_factor'],
+            extra_http_headers=fp['extra_http_headers'],
         )
         self._page = await self._context.new_page()
         log.info('采集浏览器启动完成')

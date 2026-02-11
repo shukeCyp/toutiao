@@ -25,6 +25,7 @@ class Api:
         'headless': False,
         'timeout': 30000,
         'collectTimeout': 60,
+        'rewriteWorkers': 10,
         'apiBase': '',
         'apiKey': '',
         'model': '',
@@ -724,7 +725,8 @@ class Api:
                 return {'success': False, 'message': '文章没有可改写的文字内容'}
 
             # 3. 调用 LLM 改写
-            client = RewriteClient(api_base, api_key, model)
+            timeout = self._settings.get('timeout', 30000) / 1000  # 毫秒转秒
+            client = RewriteClient(api_base, api_key, model, timeout=timeout)
             new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
 
             # 4. 替换文字段落（保持图片位置不变）
@@ -786,7 +788,7 @@ class Api:
             completed_count = 0
             counter_lock = _threading.Lock()
 
-            REWRITE_WORKERS = 3
+            REWRITE_WORKERS = self._settings.get('rewriteWorkers', 10)
 
             def _rewrite_worker(article):
                 """单篇改写 worker，在线程池线程中执行"""
@@ -835,7 +837,8 @@ class Api:
                         return
 
                     # 3. LLM 改写（每个线程独立 client 实例）
-                    client = RewriteClient(api_base, api_key, model)
+                    timeout = self._settings.get('timeout', 30000) / 1000
+                    client = RewriteClient(api_base, api_key, model, timeout=timeout)
                     new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
 
                     # 4. 替换
