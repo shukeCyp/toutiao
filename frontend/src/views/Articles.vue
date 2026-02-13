@@ -16,6 +16,17 @@
         <span class="page-info-text">共 {{ total }} 篇</span>
       </div>
       <div class="toolbar-right">
+        <button class="btn btn-sm" @click="openImportDialog">
+          导入
+        </button>
+        <button
+          class="btn btn-sm"
+          :disabled="batchDownloading || stats.total === 0"
+          @click="downloadAll"
+        >
+          <span v-if="batchDownloading" class="spinner-sm"></span>
+          {{ batchDownloading ? `下载中 ${downloadProgress.current}/${downloadProgress.total}` : '下载全部' }}
+        </button>
         <button class="btn btn-sm btn-primary" @click="openRewriteDialog" :disabled="batchRewriting">
           全部改写
         </button>
@@ -75,6 +86,45 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6" /></svg>
       </button>
     </div>
+
+    <!-- Import Dialog -->
+    <Teleport to="body">
+      <transition name="backdrop">
+        <div v-if="showImportDialog" class="dialog-backdrop" @click="closeImportDialog"></div>
+      </transition>
+      <transition name="dialog">
+        <div v-if="showImportDialog" class="dialog">
+          <div class="dialog-header">
+            <h3>导入文章链接</h3>
+            <button class="btn-icon" @click="closeImportDialog" :disabled="importing">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div class="dialog-body">
+            <p class="dialog-hint">请输入文章链接，每行一个。支持头条文章链接格式。</p>
+            <textarea
+              class="import-textarea"
+              v-model="importText"
+              placeholder="https://www.toutiao.com/article/7473002025927541286/&#10;https://www.toutiao.com/article/7473002025927541287/&#10;..."
+              rows="10"
+              :disabled="importing"
+            ></textarea>
+            <p class="import-count" v-if="importLineCount > 0">
+              共 {{ importLineCount }} 个链接
+            </p>
+          </div>
+          <div class="dialog-footer">
+            <button class="btn" @click="closeImportDialog" :disabled="importing">取消</button>
+            <button class="btn btn-primary" @click="startImport" :disabled="importing || importLineCount === 0">
+              <span v-if="importing" class="spinner-sm"></span>
+              {{ importing ? '导入中...' : '开始导入' }}
+            </button>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
 
     <!-- Rewrite Dialog -->
     <Teleport to="body">
@@ -159,7 +209,19 @@ const loading = ref(false)
 const stats = ref({ total: 0, rewritten: 0, pending: 0 })
 const rewritingId = ref(null)
 
-// Dialog state
+// Import dialog state
+const showImportDialog = ref(false)
+const importText = ref('')
+const importing = ref(false)
+const importLineCount = computed(() => {
+  return importText.value.trim().split('\n').filter(l => l.trim()).length
+})
+
+// Download all state
+const batchDownloading = ref(false)
+const downloadProgress = reactive({ current: 0, total: 0 })
+
+// Rewrite dialog state
 const showRewriteDialog = ref(false)
 const forceRewrite = ref(false)
 const batchRewriting = ref(false)
@@ -174,16 +236,70 @@ onMounted(() => {
   loadStats()
   loadArticles()
   window.__onRewriteProgress = onRewriteProgress
+  window.__onDownloadProgress = onDownloadProgress
 })
 
 onUnmounted(() => {
   window.__onRewriteProgress = null
+  window.__onDownloadProgress = null
 })
 
 function onRewriteProgress(current, total, title) {
   rewriteProgress.current = current
   rewriteProgress.total = total
   rewriteProgress.title = title
+}
+
+function onDownloadProgress(articleId, title, current, total) {
+  downloadProgress.current = current
+  downloadProgress.total = total
+}
+
+// ------ Import ------
+
+function openImportDialog() {
+  importText.value = ''
+  showImportDialog.value = true
+}
+
+function closeImportDialog() {
+  if (importing.value) return
+  showImportDialog.value = false
+}
+
+async function startImport() {
+  importing.value = true
+  const r = await appStore.callApi('import_article_urls', importText.value)
+  importing.value = false
+
+  if (r && r.success) {
+    toast.success(r.message)
+    showImportDialog.value = false
+    loadArticles()
+    loadStats()
+  } else if (r) {
+    toast.error(r.message)
+  }
+}
+
+// ------ Download All ------
+
+async function downloadAll() {
+  batchDownloading.value = true
+  downloadProgress.current = 0
+  downloadProgress.total = 0
+
+  const r = await appStore.callApi('download_all_articles')
+
+  batchDownloading.value = false
+
+  if (r && r.success) {
+    toast.success(r.message)
+    loadArticles()
+    loadStats()
+  } else if (r) {
+    toast.error(r.message)
+  }
 }
 
 async function loadStats() {
@@ -645,6 +761,44 @@ function typeLabel(t) {
   gap: var(--space-2);
   padding: var(--space-4) var(--space-5);
   border-top: 1px solid var(--surface-border);
+}
+
+/* Import textarea */
+.import-textarea {
+  width: 100%;
+  min-height: 200px;
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono, 'SF Mono', 'Monaco', 'Consolas', monospace);
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--transition-fast);
+  box-sizing: border-box;
+}
+
+.import-textarea:focus {
+  border-color: var(--accent-primary);
+}
+
+.import-textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.import-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.import-count {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin: 0;
 }
 
 /* Transitions */

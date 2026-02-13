@@ -4,7 +4,9 @@ API 类 - 提供 pywebview JS API 接口
 """
 
 import os
+import re
 import json
+import time
 import asyncio
 import threading
 import webbrowser
@@ -18,6 +20,66 @@ from models import Account, Setting, Article, save_articles, db, _write_lock
 from task_manager import TaskManager
 
 log = get_logger('api')
+
+# 参考资料标题匹配
+_REF_HEADER_RE = re.compile(r'^(参考资料|参考文献|资料来源|信息来源|素材来源|文章来源|来源)\s*[：:]*\s*$')
+
+# 作者开场白匹配（自我介绍、打招呼套话）
+_GREETING_RE = re.compile(
+    r'^('
+    r'(各位|大家|朋友们?|兄弟们?|老铁们?|小伙伴们?|宝子们?|家人们?).{0,6}(好|嗨|哈喽|hello)'
+    r'|'
+    r'(大家好|你好|哈喽|hello|hi).{0,4}(我是|我叫|这里是)'
+    r'|'
+    r'我是.{1,8}[，,].{0,15}(今天|这次|咱们?|我们|接着|继续|来聊|来说|来讲|聊聊|说说|讲讲)'
+    r'|'
+    r'(关注|喜欢)我的.{0,6}(朋友|粉丝|老铁|兄弟|小伙伴|家人|宝子).{0,6}(都|应该|肯定)?(知道|了解|清楚)'
+    r')',
+    re.IGNORECASE
+)
+
+
+def _remove_reference_elements(elements):
+    """移除文章末尾的参考资料段落（标题行及其后所有内容）"""
+    # 从后往前找参考资料标题行
+    ref_start = None
+    for i in range(len(elements) - 1, -1, -1):
+        if elements[i].get('type') == 'text' and _REF_HEADER_RE.match(elements[i]['text'].strip()):
+            ref_start = i
+            break
+
+    if ref_start is not None:
+        log.info(f'检测到参考资料段落（第 {ref_start} 个元素起），已移除 {len(elements) - ref_start} 个元素')
+        return elements[:ref_start]
+    return elements
+
+
+def _remove_greeting_elements(elements):
+    """移除文章开头的作者自我介绍/打招呼段落"""
+    if not elements:
+        return elements
+
+    # 只检查前3个文字元素
+    removed = 0
+    result = list(elements)
+    checked = 0
+    i = 0
+    while i < len(result) and checked < 3:
+        elem = result[i]
+        if elem.get('type') != 'text':
+            i += 1
+            continue
+        checked += 1
+        text = elem['text'].strip()
+        if _GREETING_RE.search(text):
+            log.info(f'检测到开场白段落，已移除: {text[:50]}')
+            result.pop(i)
+            removed += 1
+        else:
+            # 遇到非开场白的文字段落就停止检查
+            break
+
+    return result
 
 
 class Api:
@@ -713,6 +775,10 @@ class Api:
                     return await fetch_article_elements(article.url, headless=headless)
                 elements = self._run_async(_fetch())
 
+            # 1.5. 过滤参考资料段落和开场白
+            elements = _remove_reference_elements(elements)
+            elements = _remove_greeting_elements(elements)
+
             # 2. 分离文字段落
             text_indices = []
             paragraphs = []
@@ -724,10 +790,35 @@ class Api:
             if not paragraphs:
                 return {'success': False, 'message': '文章没有可改写的文字内容'}
 
-            # 3. 调用 LLM 改写
+            # 2.5. 字数不足 1000 的文章直接删除
+            total_chars = sum(len(p) for p in paragraphs)
+            if total_chars < 1000:
+                log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article_id}, title={article.title[:30]}')
+                with _write_lock:
+                    Article.delete().where(Article.id == article_id).execute()
+                return {'success': True, 'message': f'文章字数不足 1000（{total_chars} 字），已自动删除', 'deleted': True}
+
+            # 3. 调用 LLM 改写（失败自动重试最多 3 次）
             timeout = self._settings.get('timeout', 30000) / 1000  # 毫秒转秒
             client = RewriteClient(api_base, api_key, model, timeout=timeout)
-            new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
+
+            max_retries = 3
+            last_error = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        log.warning(f'改写失败 (第 {attempt}/{max_retries} 次)，5s 后重试: {e}')
+                        time.sleep(5)
+                    else:
+                        log.error(f'改写失败，已重试 {max_retries} 次: {e}')
+
+            if last_error is not None:
+                raise last_error
 
             # 4. 替换文字段落（保持图片位置不变）
             for idx, text_idx in enumerate(text_indices):
@@ -822,6 +913,10 @@ class Api:
                             fetch_article_elements(article.url, headless=headless)
                         )
 
+                    # 1.5. 过滤参考资料段落和开场白
+                    elements = _remove_reference_elements(elements)
+                    elements = _remove_greeting_elements(elements)
+
                     # 2. 分离文字
                     text_indices = []
                     paragraphs = []
@@ -836,10 +931,38 @@ class Api:
                             fail_count += 1
                         return
 
-                    # 3. LLM 改写（每个线程独立 client 实例）
+                    # 2.5. 字数不足 1000 的文章直接删除
+                    total_chars = sum(len(p) for p in paragraphs)
+                    if total_chars < 1000:
+                        log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article.id}, title={article.title[:30]}')
+                        with _write_lock:
+                            db.connect(reuse_if_open=True)
+                            Article.delete().where(Article.id == article.id).execute()
+                        with counter_lock:
+                            success_count += 1
+                        return
+
+                    # 3. LLM 改写（失败自动重试最多 3 次）
                     timeout = self._settings.get('timeout', 30000) / 1000
                     client = RewriteClient(api_base, api_key, model, timeout=timeout)
-                    new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
+
+                    max_retries = 3
+                    last_error = None
+                    for attempt in range(1, max_retries + 1):
+                        try:
+                            new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
+                            last_error = None
+                            break
+                        except Exception as e:
+                            last_error = e
+                            if attempt < max_retries:
+                                log.warning(f'改写失败 (第 {attempt}/{max_retries} 次)，5s 后重试: id={article.id}, err={e}')
+                                time.sleep(5)
+                            else:
+                                log.error(f'改写失败，已重试 {max_retries} 次: id={article.id}, err={e}')
+
+                    if last_error is not None:
+                        raise last_error
 
                     # 4. 替换
                     for j, text_idx in enumerate(text_indices):
@@ -875,10 +998,13 @@ class Api:
             log.info(f'批量改写启动: {total} 篇文章, {REWRITE_WORKERS} 线程')
 
             with ThreadPoolExecutor(max_workers=REWRITE_WORKERS, thread_name_prefix='rewriter') as executor:
-                futures = [executor.submit(_rewrite_worker, art) for art in articles]
+                futures = []
+                for art in articles:
+                    futures.append(executor.submit(_rewrite_worker, art))
+                    time.sleep(1)  # 每秒提交一个任务，避免瞬间并发过高
                 for f in as_completed(futures):
                     try:
-                        f.result(timeout=300)
+                        f.result(timeout=600)
                     except Exception:
                         pass
 
@@ -891,6 +1017,102 @@ class Api:
             }
         except Exception as e:
             log.error(f'批量改写失败: {e}', exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    def import_article_urls(self, urls_text):
+        """通过文章链接批量导入文章（一行一个链接）"""
+        import re
+        from datetime import datetime
+
+        try:
+            if isinstance(urls_text, str):
+                raw_urls = [l.strip() for l in urls_text.strip().splitlines() if l.strip()]
+            else:
+                raw_urls = []
+
+            if not raw_urls:
+                return {'success': False, 'message': '请输入至少一个文章链接'}
+
+            db.connect(reuse_if_open=True)
+
+            added = 0
+            skipped = 0
+            invalid = 0
+            now = datetime.now()
+
+            with _write_lock, db.atomic():
+                for url in raw_urls:
+                    # 提取文章 ID，支持多种头条文章 URL 格式
+                    # https://www.toutiao.com/article/7473002025927541286/
+                    # https://www.toutiao.com/a7473002025927541286/
+                    # https://www.toutiao.com/i7473002025927541286/
+                    match = re.search(r'/article/(\d+)', url)
+                    if not match:
+                        match = re.search(r'/[ai](\d{10,})', url)
+                    if not match:
+                        match = re.search(r'(\d{15,})', url)
+
+                    if not match:
+                        invalid += 1
+                        continue
+
+                    group_id = match.group(1)
+
+                    # 检查是否已存在
+                    existing = Article.get_or_none(Article.group_id == group_id)
+                    if existing:
+                        skipped += 1
+                        continue
+
+                    # 规范化 URL
+                    if not url.startswith('http'):
+                        url = 'https://www.toutiao.com/article/' + group_id + '/'
+
+                    Article.create(
+                        group_id=group_id,
+                        title=f'待下载文章 ({group_id})',
+                        url=url,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    added += 1
+
+            parts = []
+            if added:
+                parts.append(f'成功导入 {added} 篇')
+            if skipped:
+                parts.append(f'跳过 {skipped} 篇重复')
+            if invalid:
+                parts.append(f'过滤 {invalid} 个无效链接')
+            msg = '，'.join(parts) if parts else '没有可导入的文章'
+
+            log.info(f'导入文章: {msg} (输入 {len(raw_urls)} 条)')
+            return {
+                'success': added > 0,
+                'message': msg,
+                'added': added,
+                'skipped': skipped,
+                'invalid': invalid,
+            }
+        except Exception as e:
+            log.error(f'导入文章失败: {e}', exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    def download_all_articles(self):
+        """下载全部未下载的文章"""
+        try:
+            db.connect(reuse_if_open=True)
+            articles = list(Article.select(Article.id).where(
+                (Article.url != '') & ((Article.doc_path == '') | (Article.doc_path.is_null()))
+            ))
+
+            if not articles:
+                return {'success': True, 'message': '没有需要下载的文章', 'success_count': 0, 'fail_count': 0}
+
+            article_ids = [a.id for a in articles]
+            return self.batch_download_articles(article_ids)
+        except Exception as e:
+            log.error(f'下载全部文章失败: {e}', exc_info=True)
             return {'success': False, 'message': str(e)}
 
     def delete_all_articles(self):
