@@ -45,12 +45,12 @@
           {{ batchDownloading ? `下载中 ${downloadProgress.current}/${downloadProgress.total}` : `下载选中 (${selectedIds.size})` }}
         </button>
         <button
-          v-if="filter === 'not_downloaded' && articles.length > 0"
           class="btn btn-sm"
-          :disabled="batchDownloading"
+          :disabled="batchDownloading || stats.not_downloaded === 0"
           @click="downloadAll"
         >
-          全部下载
+          <span v-if="batchDownloading && selectedIds.size === 0" class="spinner-sm"></span>
+          {{ batchDownloading && selectedIds.size === 0 ? `下载中 ${downloadProgress.current}/${downloadProgress.total}` : `下载全部 (${stats.not_downloaded})` }}
         </button>
       </div>
     </div>
@@ -253,33 +253,22 @@ async function batchDownload() {
 }
 
 async function downloadAll() {
-  // 选择当前过滤条件下的所有未下载文章
-  // 先获取所有未下载的文章 ID
-  const r = await appStore.callApi('get_download_articles', 1, 999, false)
-  if (r && r.success && r.articles.length > 0) {
-    const ids = r.articles.map(a => a.id)
-    selectedIds.value = new Set(ids)
-    // 触发批量下载
-    batchDownloading.value = true
-    downloadProgress.current = 0
-    downloadProgress.total = ids.length
-    downloadingIds.value = new Set(ids)
+  batchDownloading.value = true
+  selectedIds.value = new Set()
+  downloadProgress.current = 0
+  downloadProgress.total = stats.value.not_downloaded
 
-    const result = await appStore.callApi('batch_download_articles', ids)
+  const r = await appStore.callApi('download_all_articles')
 
-    batchDownloading.value = false
-    downloadingIds.value = new Set()
+  batchDownloading.value = false
+  downloadingIds.value = new Set()
 
-    if (result && result.success) {
-      toast.success(result.message)
-      selectedIds.value = new Set()
-      loadArticles()
-      loadStats()
-    } else if (result) {
-      toast.error(result.message)
-    }
-  } else {
-    toast.info('没有需要下载的文章')
+  if (r && r.success) {
+    toast.success(r.message)
+    loadArticles()
+    loadStats()
+  } else if (r) {
+    toast.error(r.message)
   }
 }
 

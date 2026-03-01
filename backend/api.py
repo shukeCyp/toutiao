@@ -15,72 +15,11 @@ from logger import get_logger
 from browser_manager import BrowserManager
 from toutiao_client import ToutiaoClient
 from article_downloader import ArticleDownloader, fetch_article_elements, read_docx_elements, generate_docx, safe_filename
-from rewrite_client import RewriteClient
+from rewrite_client import RewriteClient, SensitiveContentError
 from models import Account, Setting, Article, save_articles, db, _write_lock
 from task_manager import TaskManager
 
 log = get_logger('api')
-
-# 参考资料标题匹配
-_REF_HEADER_RE = re.compile(r'^(参考资料|参考文献|资料来源|信息来源|素材来源|文章来源|来源)\s*[：:]*\s*$')
-
-# 作者开场白匹配（自我介绍、打招呼套话）
-_GREETING_RE = re.compile(
-    r'^('
-    r'(各位|大家|朋友们?|兄弟们?|老铁们?|小伙伴们?|宝子们?|家人们?).{0,6}(好|嗨|哈喽|hello)'
-    r'|'
-    r'(大家好|你好|哈喽|hello|hi).{0,4}(我是|我叫|这里是)'
-    r'|'
-    r'我是.{1,8}[，,].{0,15}(今天|这次|咱们?|我们|接着|继续|来聊|来说|来讲|聊聊|说说|讲讲)'
-    r'|'
-    r'(关注|喜欢)我的.{0,6}(朋友|粉丝|老铁|兄弟|小伙伴|家人|宝子).{0,6}(都|应该|肯定)?(知道|了解|清楚)'
-    r')',
-    re.IGNORECASE
-)
-
-
-def _remove_reference_elements(elements):
-    """移除文章末尾的参考资料段落（标题行及其后所有内容）"""
-    # 从后往前找参考资料标题行
-    ref_start = None
-    for i in range(len(elements) - 1, -1, -1):
-        if elements[i].get('type') == 'text' and _REF_HEADER_RE.match(elements[i]['text'].strip()):
-            ref_start = i
-            break
-
-    if ref_start is not None:
-        log.info(f'检测到参考资料段落（第 {ref_start} 个元素起），已移除 {len(elements) - ref_start} 个元素')
-        return elements[:ref_start]
-    return elements
-
-
-def _remove_greeting_elements(elements):
-    """移除文章开头的作者自我介绍/打招呼段落"""
-    if not elements:
-        return elements
-
-    # 只检查前3个文字元素
-    removed = 0
-    result = list(elements)
-    checked = 0
-    i = 0
-    while i < len(result) and checked < 3:
-        elem = result[i]
-        if elem.get('type') != 'text':
-            i += 1
-            continue
-        checked += 1
-        text = elem['text'].strip()
-        if _GREETING_RE.search(text):
-            log.info(f'检测到开场白段落，已移除: {text[:50]}')
-            result.pop(i)
-            removed += 1
-        else:
-            # 遇到非开场白的文字段落就停止检查
-            break
-
-    return result
-
 
 class Api:
     DEFAULT_SETTINGS = {
@@ -398,10 +337,10 @@ class Api:
     # 采集 API（ToutiaoClient）
     # ------------------------------------------
 
-    def collect_account(self, account_url, since_time=0):
-        """采集单个账号的文章数据，since_time 为 Unix 时间戳，只采集之后的"""
+    def collect_account(self, account_url, since_time=0, until_time=0):
+        """采集单个账号的文章数据，支持时间范围过滤 + 自动下滑加载"""
         try:
-            log.info(f'开始采集: {account_url} (since={since_time})')
+            log.info(f'开始采集: {account_url} (since={since_time}, until={until_time})')
             headless = self._settings.get('headless', False)
             collect_timeout = self._settings.get('collectTimeout', 60)
 
@@ -423,6 +362,7 @@ class Api:
                     account_url,
                     on_progress=on_progress,
                     since_time=since_time,
+                    until_time=until_time,
                     timeout=collect_timeout,
                 )
                 return result
@@ -477,12 +417,13 @@ class Api:
     # 批量抓取任务 API
     # ------------------------------------------
 
-    def start_batch_collect(self, type_name, count=0, since_time=0):
+    def start_batch_collect(self, type_name, article_count=0, since_time=0, until_time=0):
         """
-        启动批量采集任务
+        启动批量采集任务（单类型）
         type_name: 账号类型
-        count: 抓取数量，0 表示全部
-        since_time: 时间过滤
+        article_count: 抓取文章数量，0 表示不限
+        since_time: 时间范围起点
+        until_time: 时间范围终点
         """
         try:
             type_name = type_name.strip()
@@ -490,16 +431,74 @@ class Api:
             if not accounts:
                 return {'success': False, 'message': f'类型「{type_name}」下没有账号'}
 
-            if count and count > 0:
-                accounts = accounts[:count]
-
             collect_timeout = self._settings.get('collectTimeout', 60)
             headless = self._settings.get('headless', False)
-            log.info(f'批量采集: type={type_name}, accounts={len(accounts)}, since={since_time}, timeout={collect_timeout}s')
-            result = self._task_manager.start_task(accounts, since_time=since_time, category=type_name, collect_timeout=collect_timeout, headless=headless)
+
+            # 构建任务列表
+            task_items = [
+                {'url': url, 'category': type_name, 'max_articles': article_count}
+                for url in accounts
+            ]
+
+            log.info(f'批量采集: type={type_name}, accounts={len(accounts)}, article_limit={article_count}, since={since_time}, until={until_time}, timeout={collect_timeout}s')
+            result = self._task_manager.start_task(task_items, since_time=since_time, until_time=until_time, collect_timeout=collect_timeout, headless=headless)
             return result
         except Exception as e:
             log.error(f'启动批量采集失败: {e}')
+            return {'success': False, 'message': str(e)}
+
+    def start_multi_batch_collect(self, tasks_json, since_time=0, until_time=0):
+        """
+        启动多类型批量采集任务
+        tasks_json: JSON 字符串或列表，每项: {type_name: str, article_count: int}
+        since_time: 统一时间范围起点
+        until_time: 统一时间范围终点
+        """
+        try:
+            if isinstance(tasks_json, str):
+                tasks = json.loads(tasks_json)
+            else:
+                tasks = tasks_json
+
+            if not tasks:
+                return {'success': False, 'message': '请至少添加一个采集类目'}
+
+            collect_timeout = self._settings.get('collectTimeout', 60)
+            headless = self._settings.get('headless', False)
+
+            task_items = []
+            type_summary_parts = []
+
+            for task in tasks:
+                type_name = task.get('type_name', '').strip()
+                article_count = task.get('article_count', 0)
+                if not type_name:
+                    continue
+
+                accounts = self._read_accounts(type_name)
+                if not accounts:
+                    log.warning(f'类型「{type_name}」下没有账号，跳过')
+                    continue
+
+                for url in accounts:
+                    task_items.append({
+                        'url': url,
+                        'category': type_name,
+                        'max_articles': article_count,
+                    })
+
+                limit_str = f'{article_count}篇' if article_count > 0 else '不限'
+                type_summary_parts.append(f'{type_name}({len(accounts)}个账号, {limit_str})')
+
+            if not task_items:
+                return {'success': False, 'message': '所有类目下都没有账号'}
+
+            type_summary = ', '.join(type_summary_parts)
+            log.info(f'多类型批量采集: {type_summary}, since={since_time}, until={until_time}, timeout={collect_timeout}s')
+            result = self._task_manager.start_task(task_items, since_time=since_time, until_time=until_time, collect_timeout=collect_timeout, headless=headless)
+            return result
+        except Exception as e:
+            log.error(f'启动多类型批量采集失败: {e}')
             return {'success': False, 'message': str(e)}
 
     def get_task_status(self):
@@ -775,10 +774,6 @@ class Api:
                     return await fetch_article_elements(article.url, headless=headless)
                 elements = self._run_async(_fetch())
 
-            # 1.5. 过滤参考资料段落和开场白
-            elements = _remove_reference_elements(elements)
-            elements = _remove_greeting_elements(elements)
-
             # 2. 分离文字段落
             text_indices = []
             paragraphs = []
@@ -793,6 +788,10 @@ class Api:
             # 2.5. 字数不足 1000 的文章直接删除
             total_chars = sum(len(p) for p in paragraphs)
             if total_chars < 1000:
+                # #region agent log
+                _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                open(_dbg, 'a').write(json.dumps({"location":"api.py:rewrite_article:delete_short","message":"文章字数不足已删除","data":{"article_id":article_id,"title":article.title[:50],"total_chars":total_chars,"reason":"total_chars < 1000"},"timestamp":int(time.time()*1000)}) + '\n')
+                # #endregion
                 log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article_id}, title={article.title[:30]}')
                 with _write_lock:
                     Article.delete().where(Article.id == article_id).execute()
@@ -809,6 +808,16 @@ class Api:
                     new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
                     last_error = None
                     break
+                except SensitiveContentError as e:
+                    # 敏感词等需删文的错误：不重试，直接删文
+                    # #region agent log
+                    _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                    open(_dbg, 'a').write(json.dumps({"location":"api.py:rewrite_article:delete_sensitive","message":"敏感词已删除","data":{"article_id":article_id,"title":article.title[:50],"reason":str(e)[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+                    # #endregion
+                    log.info(f'内容包含敏感词，删除文章: id={article_id}, title={article.title[:30]}')
+                    with _write_lock:
+                        Article.delete().where(Article.id == article_id).execute()
+                    return {'success': True, 'message': '内容包含敏感词，已自动删除', 'deleted': True}
                 except Exception as e:
                     last_error = e
                     if attempt < max_retries:
@@ -822,7 +831,8 @@ class Api:
 
             # 4. 替换文字段落（保持图片位置不变）
             for idx, text_idx in enumerate(text_indices):
-                elements[text_idx] = {'type': 'text', 'text': new_paragraphs[idx]}
+                if idx < len(new_paragraphs):
+                    elements[text_idx] = {'type': 'text', 'text': new_paragraphs[idx]}
 
             # 5. 生成 docx 保存
             filename = safe_filename(new_title) + '.docx'
@@ -842,6 +852,10 @@ class Api:
             return {'success': True, 'message': '改写完成', 'save_path': save_path, 'new_title': new_title}
 
         except Exception as e:
+            # #region agent log
+            _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+            open(_dbg, 'a').write(json.dumps({"location":"api.py:rewrite_article:error","message":"单篇改写失败","data":{"article_id":article_id,"error":str(e)[:200],"error_type":type(e).__name__},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             log.error(f'文章改写失败: {e}', exc_info=True)
             return {'success': False, 'message': str(e)}
 
@@ -876,6 +890,8 @@ class Api:
             total = len(articles)
             success_count = 0
             fail_count = 0
+            deleted_count = 0   # 字数不足被删除
+            skip_count = 0      # 无文字内容被跳过
             completed_count = 0
             counter_lock = _threading.Lock()
 
@@ -883,7 +899,7 @@ class Api:
 
             def _rewrite_worker(article):
                 """单篇改写 worker，在线程池线程中执行"""
-                nonlocal success_count, fail_count, completed_count
+                nonlocal success_count, fail_count, deleted_count, skip_count, completed_count
 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -913,10 +929,6 @@ class Api:
                             fetch_article_elements(article.url, headless=headless)
                         )
 
-                    # 1.5. 过滤参考资料段落和开场白
-                    elements = _remove_reference_elements(elements)
-                    elements = _remove_greeting_elements(elements)
-
                     # 2. 分离文字
                     text_indices = []
                     paragraphs = []
@@ -926,20 +938,28 @@ class Api:
                             paragraphs.append(elem['text'])
 
                     if not paragraphs:
+                        # #region agent log
+                        _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                        open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:skip_no_content","message":"无文字内容跳过","data":{"article_id":article.id,"title":article.title[:50]},"timestamp":int(time.time()*1000)}) + '\n')
+                        # #endregion
                         log.warning(f'文章无文字内容，跳过: id={article.id}')
                         with counter_lock:
-                            fail_count += 1
+                            skip_count += 1
                         return
 
                     # 2.5. 字数不足 1000 的文章直接删除
                     total_chars = sum(len(p) for p in paragraphs)
                     if total_chars < 1000:
+                        # #region agent log
+                        _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                        open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:delete_short","message":"字数不足已删除","data":{"article_id":article.id,"title":article.title[:50],"total_chars":total_chars,"reason":"total_chars < 1000"},"timestamp":int(time.time()*1000)}) + '\n')
+                        # #endregion
                         log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article.id}, title={article.title[:30]}')
                         with _write_lock:
                             db.connect(reuse_if_open=True)
                             Article.delete().where(Article.id == article.id).execute()
                         with counter_lock:
-                            success_count += 1
+                            deleted_count += 1
                         return
 
                     # 3. LLM 改写（失败自动重试最多 3 次）
@@ -953,6 +973,19 @@ class Api:
                             new_title, new_paragraphs = client.rewrite(article.title, paragraphs)
                             last_error = None
                             break
+                        except SensitiveContentError as e:
+                            # 敏感词等需删文的错误：不重试，直接删文
+                            # #region agent log
+                            _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                            open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:delete_sensitive","message":"敏感词已删除","data":{"article_id":article.id,"title":article.title[:50],"reason":str(e)[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+                            # #endregion
+                            log.info(f'内容包含敏感词，删除文章: id={article.id}, title={article.title[:30]}')
+                            with _write_lock:
+                                db.connect(reuse_if_open=True)
+                                Article.delete().where(Article.id == article.id).execute()
+                            with counter_lock:
+                                deleted_count += 1
+                            return
                         except Exception as e:
                             last_error = e
                             if attempt < max_retries:
@@ -964,9 +997,10 @@ class Api:
                     if last_error is not None:
                         raise last_error
 
-                    # 4. 替换
+                    # 4. 替换文字段落（保持图片位置不变）
                     for j, text_idx in enumerate(text_indices):
-                        elements[text_idx] = {'type': 'text', 'text': new_paragraphs[j]}
+                        if j < len(new_paragraphs):
+                            elements[text_idx] = {'type': 'text', 'text': new_paragraphs[j]}
 
                     # 5. 保存 docx
                     filename = safe_filename(new_title) + '.docx'
@@ -989,6 +1023,10 @@ class Api:
                     log.info(f'改写完成: {save_path}')
 
                 except Exception as e:
+                    # #region agent log
+                    _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
+                    open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:error","message":"批量改写失败(需关注是否应删文)","data":{"article_id":article.id,"title":article.title[:50],"error":str(e)[:200],"error_type":type(e).__name__},"timestamp":int(time.time()*1000)}) + '\n')
+                    # #endregion
                     log.error(f'批量改写失败: id={article.id}, err={e}', exc_info=True)
                     with counter_lock:
                         fail_count += 1
@@ -1008,12 +1046,24 @@ class Api:
                     except Exception:
                         pass
 
-            log.info(f'批量改写完成: 成功 {success_count}, 失败 {fail_count}')
+            # 构建结果消息
+            parts = [f'改写成功 {success_count} 篇']
+            if deleted_count > 0:
+                parts.append(f'删除 {deleted_count} 篇（字数不足或敏感词）')
+            if skip_count > 0:
+                parts.append(f'无内容跳过 {skip_count} 篇')
+            if fail_count > 0:
+                parts.append(f'失败 {fail_count} 篇')
+            msg = '改写完成: ' + ', '.join(parts)
+
+            log.info(f'批量改写完成: 成功={success_count}, 删除={deleted_count}, 跳过={skip_count}, 失败={fail_count}')
             return {
                 'success': True,
-                'message': f'改写完成: 成功 {success_count} 篇, 失败 {fail_count} 篇',
+                'message': msg,
                 'success_count': success_count,
                 'fail_count': fail_count,
+                'deleted_count': deleted_count,
+                'skip_count': skip_count,
             }
         except Exception as e:
             log.error(f'批量改写失败: {e}', exc_info=True)
@@ -1099,18 +1149,102 @@ class Api:
             return {'success': False, 'message': str(e)}
 
     def download_all_articles(self):
-        """下载全部未下载的文章"""
+        """下载全部未下载的文章（10线程并发）"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading as _threading
+
         try:
+            save_path = self._settings.get('articleSavePath', '')
+            if not save_path:
+                return {'success': False, 'message': '请先在设置中配置文章保存路径'}
+
+            headless = self._settings.get('headless', False)
+
             db.connect(reuse_if_open=True)
-            articles = list(Article.select(Article.id).where(
+            articles = list(Article.select().where(
                 (Article.url != '') & ((Article.doc_path == '') | (Article.doc_path.is_null()))
             ))
 
             if not articles:
                 return {'success': True, 'message': '没有需要下载的文章', 'success_count': 0, 'fail_count': 0}
 
-            article_ids = [a.id for a in articles]
-            return self.batch_download_articles(article_ids)
+            total = len(articles)
+            success_count = 0
+            fail_count = 0
+            completed_count = 0
+            counter_lock = _threading.Lock()
+
+            DOWNLOAD_WORKERS = 10
+
+            def _download_worker(article):
+                """单篇下载 worker"""
+                nonlocal success_count, fail_count, completed_count
+
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                try:
+                    with counter_lock:
+                        completed_count += 1
+                        current = completed_count
+
+                    # 通知前端进度
+                    if self._window:
+                        try:
+                            self._window.evaluate_js(
+                                f'window.__onDownloadProgress && window.__onDownloadProgress({article.id}, {json.dumps(article.title[:30])}, {current}, {total})'
+                            )
+                        except Exception:
+                            pass
+
+                    log.info(f'并发下载 [{current}/{total}]: {article.title[:30]}')
+
+                    async def _do_download():
+                        downloader = ArticleDownloader()
+                        doc_path = await downloader.download(
+                            article_url=article.url,
+                            save_dir=save_path,
+                            category=article.category,
+                            title=article.title,
+                            headless=headless,
+                        )
+                        return doc_path
+
+                    doc_path = loop.run_until_complete(_do_download())
+
+                    with _write_lock:
+                        db.connect(reuse_if_open=True)
+                        Article.update(doc_path=doc_path).where(Article.id == article.id).execute()
+
+                    with counter_lock:
+                        success_count += 1
+
+                    log.info(f'下载完成: {doc_path}')
+
+                except Exception as e:
+                    log.error(f'并发下载失败: id={article.id}, err={e}')
+                    with counter_lock:
+                        fail_count += 1
+                finally:
+                    loop.close()
+
+            log.info(f'全部下载启动: {total} 篇文章, {DOWNLOAD_WORKERS} 线程')
+
+            with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS, thread_name_prefix='downloader') as executor:
+                futures = [executor.submit(_download_worker, art) for art in articles]
+                for f in as_completed(futures):
+                    try:
+                        f.result(timeout=300)
+                    except Exception:
+                        pass
+
+            log.info(f'全部下载完成: 成功 {success_count}, 失败 {fail_count}')
+            return {
+                'success': True,
+                'message': f'下载完成: 成功 {success_count} 篇, 失败 {fail_count} 篇',
+                'success_count': success_count,
+                'fail_count': fail_count,
+            }
         except Exception as e:
             log.error(f'下载全部文章失败: {e}', exc_info=True)
             return {'success': False, 'message': str(e)}

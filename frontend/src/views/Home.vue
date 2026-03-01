@@ -15,27 +15,32 @@
         </div>
 
         <div class="form-group">
-          <label class="form-label">抓取数量</label>
+          <label class="form-label">抓取文章数量</label>
           <div class="count-row">
             <input
               class="input count-input"
               type="number"
-              v-model.number="count"
-              :disabled="isRunning || collectAll"
+              v-model.number="articleCount"
+              :disabled="isRunning || noLimit"
               min="1"
-              placeholder="数量"
+              placeholder="文章数"
             />
             <label class="checkbox-label">
-              <input type="checkbox" v-model="collectAll" :disabled="isRunning" />
-              <span>全部</span>
+              <input type="checkbox" v-model="noLimit" :disabled="isRunning" />
+              <span>不限</span>
             </label>
           </div>
+          <span class="form-hint">每个类型最多抓取的文章篇数，不限则抓取全部</span>
         </div>
 
         <div class="form-group">
-          <label class="form-label">起始时间</label>
-          <input class="input" type="datetime-local" v-model="sinceTimeStr" :disabled="isRunning" />
-          <span class="form-hint">只抓取该时间之后发布的文章</span>
+          <label class="form-label">时间范围</label>
+          <div class="time-range-row">
+            <input class="input time-input" type="datetime-local" v-model="sinceTimeStr" :disabled="isRunning" />
+            <span class="time-range-sep">至</span>
+            <input class="input time-input" type="datetime-local" v-model="untilTimeStr" :disabled="isRunning" />
+          </div>
+          <span class="form-hint">只抓取该时间段内的文章，会自动下滑加载直到超出范围</span>
         </div>
 
         <div class="form-actions">
@@ -50,6 +55,20 @@
             </svg>
             <span v-if="isRunning" class="spinner"></span>
             {{ isRunning ? '运行中...' : '开始抓取' }}
+          </button>
+          <button
+            class="btn btn-batch"
+            @click="openBatchDialog"
+            :disabled="isRunning"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+            </svg>
+            批量抓取
           </button>
           <button v-if="isRunning" class="btn" @click="stopTask">
             停止任务
@@ -109,6 +128,90 @@
         </div>
       </div>
     </div>
+
+    <!-- Batch Dialog -->
+    <Teleport to="body">
+      <div v-if="showBatchDialog" class="dialog-overlay" @click.self="showBatchDialog = false">
+        <div class="dialog">
+          <div class="dialog-header">
+            <h3 class="dialog-title">批量抓取设置</h3>
+            <button class="dialog-close" @click="showBatchDialog = false">&times;</button>
+          </div>
+
+          <div class="dialog-body">
+            <!-- Batch task list -->
+            <div class="batch-tasks">
+              <div class="batch-tasks-header">
+                <span class="batch-col-type">类目</span>
+                <span class="batch-col-count">文章数量</span>
+                <span class="batch-col-action"></span>
+              </div>
+              <div
+                v-for="(task, idx) in batchTasks"
+                :key="idx"
+                class="batch-row"
+              >
+                <select class="input batch-type-select" v-model="task.type_name">
+                  <option value="" disabled>选择类目...</option>
+                  <option v-for="t in types" :key="t" :value="t">{{ t }}</option>
+                </select>
+                <div class="batch-count-wrap">
+                  <input
+                    class="input batch-count-input"
+                    type="number"
+                    v-model.number="task.article_count"
+                    min="0"
+                    placeholder="0=不限"
+                  />
+                </div>
+                <button
+                  class="btn-icon batch-remove"
+                  @click="removeBatchTask(idx)"
+                  :disabled="batchTasks.length <= 1"
+                  title="删除"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+              <button class="btn btn-add-row" @click="addBatchTask">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                添加类目
+              </button>
+            </div>
+
+            <!-- Unified time range -->
+            <div class="form-group batch-time-group">
+              <label class="form-label">统一时间范围</label>
+              <div class="time-range-row">
+                <input class="input time-input" type="datetime-local" v-model="batchSinceTimeStr" />
+                <span class="time-range-sep">至</span>
+                <input class="input time-input" type="datetime-local" v-model="batchUntilTimeStr" />
+              </div>
+              <span class="form-hint">只抓取该时间段内的文章，会自动下滑加载</span>
+            </div>
+          </div>
+
+          <div class="dialog-footer">
+            <button class="btn" @click="showBatchDialog = false">取消</button>
+            <button class="btn btn-primary" @click="startBatchTasks">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              开始批量抓取
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -123,9 +226,10 @@ const { toast } = useToast()
 // Form state
 const types = ref([])
 const selectedType = ref('')
-const count = ref(10)
-const collectAll = ref(false)
+const articleCount = ref(10)
+const noLimit = ref(false)
 const sinceTimeStr = ref('')
+const untilTimeStr = ref('')
 
 // Task state
 const taskStatus = ref({
@@ -156,18 +260,25 @@ const statusLabel = computed(() => {
 })
 
 const typeAccountCount = computed(() => {
-  // Will be loaded on type change
   return typeCountCache.value
 })
 
 const typeCountCache = ref(0)
 
+// Batch dialog state
+const showBatchDialog = ref(false)
+const batchTasks = ref([])
+const batchSinceTimeStr = ref('')
+const batchUntilTimeStr = ref('')
+
 // Load types on mount
 onMounted(async () => {
-  // Set default time to today 00:00
+  // Set default time range: today 00:00 ~ today 23:59
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59)
   sinceTimeStr.value = formatDatetimeLocal(today)
+  untilTimeStr.value = formatDatetimeLocal(todayEnd)
 
   const r = await appStore.callApi('get_account_types')
   if (r && r.success) {
@@ -208,23 +319,25 @@ function formatDatetimeLocal(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-function getSinceTimestamp() {
-  if (!sinceTimeStr.value) return 0
-  return Math.floor(new Date(sinceTimeStr.value).getTime() / 1000)
+function getTimestamp(timeStr) {
+  if (!timeStr) return 0
+  return Math.floor(new Date(timeStr).getTime() / 1000)
 }
 
+// --- Single type task ---
 async function startTask() {
   if (!selectedType.value) {
     toast.warning('请先选择抓取类型')
     return
   }
 
-  const c = collectAll.value ? 0 : (count.value || 0)
+  const c = noLimit.value ? 0 : (articleCount.value || 0)
   const result = await appStore.callApi(
     'start_batch_collect',
     selectedType.value,
     c,
-    getSinceTimestamp()
+    getTimestamp(sinceTimeStr.value),
+    getTimestamp(untilTimeStr.value)
   )
 
   if (result && result.success) {
@@ -235,6 +348,63 @@ async function startTask() {
   }
 }
 
+// --- Batch dialog ---
+function openBatchDialog() {
+  // Initialize with one empty row
+  batchTasks.value = [{ type_name: '', article_count: 10 }]
+  // Copy time range from main form
+  batchSinceTimeStr.value = sinceTimeStr.value
+  batchUntilTimeStr.value = untilTimeStr.value
+  showBatchDialog.value = true
+}
+
+function addBatchTask() {
+  batchTasks.value.push({ type_name: '', article_count: 10 })
+}
+
+function removeBatchTask(idx) {
+  if (batchTasks.value.length > 1) {
+    batchTasks.value.splice(idx, 1)
+  }
+}
+
+async function startBatchTasks() {
+  // Validate
+  const validTasks = batchTasks.value.filter(t => t.type_name)
+  if (validTasks.length === 0) {
+    toast.warning('请至少选择一个类目')
+    return
+  }
+
+  // Check duplicates
+  const seen = new Set()
+  for (const t of validTasks) {
+    if (seen.has(t.type_name)) {
+      toast.warning(`类目「${t.type_name}」重复，请合并`)
+      return
+    }
+    seen.add(t.type_name)
+  }
+
+  const since = getTimestamp(batchSinceTimeStr.value)
+  const until = getTimestamp(batchUntilTimeStr.value)
+  const result = await appStore.callApi(
+    'start_multi_batch_collect',
+    JSON.stringify(validTasks),
+    since,
+    until
+  )
+
+  if (result && result.success) {
+    toast.success(result.message)
+    showBatchDialog.value = false
+    startPolling()
+  } else if (result) {
+    toast.error(result.message)
+  }
+}
+
+// --- Task control ---
 async function stopTask() {
   const r = await appStore.callApi('stop_batch_task')
   if (r && r.success) {
@@ -276,7 +446,7 @@ function stopPolling() {
 
 .home-layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 380px 1fr;
   gap: var(--space-6);
   height: 100%;
 }
@@ -341,6 +511,23 @@ function stopPolling() {
 
 .count-input {
   width: 100px !important;
+  flex-shrink: 0;
+}
+
+.time-range-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.time-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.time-range-sep {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 
@@ -531,4 +718,177 @@ function stopPolling() {
 .log-success .log-msg { color: var(--success); }
 .log-error .log-msg { color: var(--error); }
 .log-warning .log-msg { color: var(--warning); }
+
+/* Batch button */
+.btn-batch {
+  background: var(--surface-primary);
+  border: 1px solid var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.btn-batch:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+/* Dialog overlay */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+
+.dialog {
+  background: var(--surface-primary);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-lg);
+  width: 520px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.dialog-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.dialog-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.dialog-body {
+  padding: var(--space-5);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--surface-border);
+}
+
+/* Batch tasks */
+.batch-tasks {
+  margin-bottom: var(--space-5);
+}
+
+.batch-tasks-header {
+  display: grid;
+  grid-template-columns: 1fr 120px 36px;
+  gap: var(--space-3);
+  padding: 0 0 var(--space-2) 0;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.batch-row {
+  display: grid;
+  grid-template-columns: 1fr 120px 36px;
+  gap: var(--space-3);
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.batch-type-select {
+  width: 100%;
+}
+
+.batch-count-wrap {
+  width: 100%;
+}
+
+.batch-count-input {
+  width: 100%;
+}
+
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--error);
+  border-color: var(--surface-border);
+}
+
+.btn-icon:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.btn-add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  margin-top: var(--space-2);
+  background: none;
+  border: 1px dashed var(--surface-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.btn-add-row:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.batch-time-group {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--surface-border);
+}
 </style>

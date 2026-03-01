@@ -4,6 +4,7 @@ ToutiaoClient - 头条对标账号数据采集客户端
 """
 
 import json
+import time as _time
 import asyncio
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -13,8 +14,11 @@ from fingerprint import random_fingerprint
 log = get_logger('collector')
 
 
-# 目标 API 地址
-FEED_API_URL = 'https://www.toutiao.com/api/pc/list/feed'
+# 目标 API 地址（首页热门 + 用户文章列表分页）
+FEED_API_URLS = [
+    '/api/pc/list/feed',
+    '/api/pc/list/user/feed',
+]
 
 
 class ArticleItem:
@@ -123,7 +127,9 @@ class ToutiaoClient:
         self._feed_responses = []  # 原始 feed 响应缓存
         self._collecting = False
         self._on_progress = None   # 进度回调 (message, articles_count)
-        self._since_time = 0       # 时间过滤：只采集此时间戳之后的文章
+        self._since_time = 0       # 时间范围起点（最早）
+        self._until_time = 0       # 时间范围终点（最晚）
+        self._reached_time_boundary = False  # 是否已滚动到 since_time 之前的文章
 
     @property
     def is_running(self):
@@ -187,19 +193,21 @@ class ToutiaoClient:
         self._page = None
         self._playwright = None
 
-    async def collect_account(self, account_url, on_progress=None, since_time=0, timeout=60, **_kwargs):
+    async def collect_account(self, account_url, on_progress=None, since_time=0, until_time=0, timeout=60, **_kwargs):
         """
         采集单个账号的文章数据
-        打开页面，拦截到 feed 接口数据后立即解析、过滤，然后关闭浏览器返回。
+        打开页面，拦截 feed 接口数据。设置了时间范围时会持续下滑加载，
+        直到遇到早于 since_time 的文章或没有更多数据为止。
 
         Args:
             account_url: 账号主页链接
             on_progress: 进度回调 (message: str, count: int)
-            since_time: Unix 时间戳，只采集该时间点之后发布的文章，0 表示不过滤
+            since_time: 时间范围起点 (Unix 时间戳)，只采集该时间之后的文章，0 = 不限
+            until_time: 时间范围终点 (Unix 时间戳)，只采集该时间之前的文章，0 = 不限
             timeout: 采集超时时间（秒），默认 60 秒
 
         Returns:
-            list[dict]: 解析后的文章列表
+            list[dict]: 时间范围内的文章列表
         """
         if not self._page:
             raise RuntimeError('浏览器未启动，请先调用 launch()')
@@ -209,47 +217,91 @@ class ToutiaoClient:
         self._collecting = True
         self._on_progress = on_progress
         self._since_time = since_time
+        self._until_time = until_time
+        self._has_more = True
+        self._reached_time_boundary = False
 
-        # 使用当前运行中的事件循环创建 future
         loop = asyncio.get_running_loop()
         self._feed_received = loop.create_future()
 
         since_str = datetime.fromtimestamp(since_time).strftime('%Y-%m-%d %H:%M:%S') if since_time else '不限'
+        until_str = datetime.fromtimestamp(until_time).strftime('%Y-%m-%d %H:%M:%S') if until_time else '不限'
         log.info(f'开始采集: {account_url}')
-        log.info(f'参数: since={since_str}, timeout={timeout}s')
+        log.info(f'参数: since={since_str}, until={until_str}, timeout={timeout}s')
 
-        # 页面加载超时 = 采集超时的一半，至少 15 秒
-        page_timeout = max(int(timeout * 1000 // 2), 15000)
-        # Feed 等待超时 = 采集超时减去页面加载预留，至少 10 秒
-        feed_timeout = max(timeout - page_timeout // 1000 - 5, 10)
+        # 页面加载超时：120 秒
+        page_timeout = 120000
 
         # 注册网络响应监听（必须在 goto 之前注册）
         self._page.on('response', self._on_response)
 
         try:
             self._notify('正在打开账号页面...', 0)
-            # 使用 load 等待 JS 执行完毕，确保 feed API 被触发
             await self._page.goto(account_url, wait_until='load', timeout=page_timeout)
 
             self._notify('等待 Feed 数据...', 0)
 
-            # 等待拦截到 feed 数据
+            # 等待首次 feed 数据
             try:
-                await asyncio.wait_for(asyncio.shield(self._feed_received), timeout=feed_timeout)
+                await asyncio.wait_for(asyncio.shield(self._feed_received), timeout=15)
             except asyncio.TimeoutError:
-                # 超时后再等一小段，有时 feed 请求稍晚才发出
                 log.warning('首次等待超时，额外等待 5 秒...')
                 await self._page.wait_for_timeout(5000)
 
-            current_url = self._page.url
-            log.debug(f'当前页面URL: {current_url}')
+            # 持续下滑加载：设了时间范围且未到达边界时，始终尝试滚动
+            need_scroll = (since_time or until_time) and not self._reached_time_boundary
+            log.info(f'首页数据获取完成: articles={len(self._articles)}, has_more={self._has_more}, reached_boundary={self._reached_time_boundary}, need_scroll={need_scroll}')
+
+            if need_scroll:
+                scroll_start = _time.monotonic()
+                # 滚动时间预算 = 总超时 - 10秒（页面加载开销）
+                scroll_budget = max(timeout - 10, 15)
+                scroll_count = 0
+
+                while (self._collecting
+                       and not self._reached_time_boundary
+                       and (_time.monotonic() - scroll_start) < scroll_budget):
+
+                    scroll_count += 1
+                    self._notify(f'下滑加载中 (第{scroll_count}页)... 已获取 {len(self._articles)} 篇', len(self._articles))
+
+                    # 创建新 future 等待下一个 feed 响应
+                    self._feed_received = loop.create_future()
+
+                    # 模拟人工鼠标滚轮下滑
+                    await self._scroll_to_bottom()
+
+                    # 等待 feed 响应
+                    try:
+                        await asyncio.wait_for(asyncio.shield(self._feed_received), timeout=10)
+                    except asyncio.TimeoutError:
+                        # 第一次超时再试一次滚动
+                        log.info(f'第 {scroll_count} 次滚动未触发加载，重试...')
+                        self._feed_received = loop.create_future()
+                        await self._scroll_to_bottom()
+                        try:
+                            await asyncio.wait_for(asyncio.shield(self._feed_received), timeout=8)
+                        except asyncio.TimeoutError:
+                            log.info('重试仍超时，停止滚动')
+                            break
+
+                    # 滚动间隔，避免请求过快
+                    await self._page.wait_for_timeout(1000)
+
+                elapsed = round(_time.monotonic() - scroll_start, 1)
+                if self._reached_time_boundary:
+                    log.info(f'已到达时间边界，停止滚动 (共 {scroll_count} 次滚动, {elapsed}s)')
+                elif not self._collecting:
+                    log.info(f'采集被停止 (共 {scroll_count} 次滚动, {elapsed}s)')
+                else:
+                    log.warning(f'滚动超时 ({elapsed}s), 共 {scroll_count} 次滚动')
+
             self._notify(f'采集完成，共 {len(self._articles)} 篇文章', len(self._articles))
 
         finally:
             self._page.remove_listener('response', self._on_response)
             self._collecting = False
 
-        # 拦截到数据后关闭浏览器
         log.info(f'数据已获取，关闭浏览器。共 {len(self._articles)} 篇')
         await self.close()
 
@@ -259,7 +311,7 @@ class ToutiaoClient:
         """监听网络响应，拦截 feed 接口，拿到数据后立即解析并通知完成"""
         try:
             url = response.url
-            if FEED_API_URL not in url:
+            if not any(u in url for u in FEED_API_URLS):
                 return
 
             log.info(f'拦截到 Feed 请求: status={response.status}, url={url[:100]}')
@@ -283,9 +335,12 @@ class ToutiaoClient:
             log.warning(f'解析 Feed 响应异常: {e}')
 
     def _parse_feed_response(self, body):
-        """解析 feed 接口全部文章，按 since_time 过滤"""
+        """解析 feed 接口全部文章，按时间范围过滤，检测时间边界"""
         if not isinstance(body, dict):
             return
+
+        # 更新 has_more 标志
+        self._has_more = body.get('has_more', False)
 
         data_list = body.get('data', [])
         if not isinstance(data_list, list):
@@ -293,7 +348,8 @@ class ToutiaoClient:
 
         seen_ids = {str(a.group_id) for a in self._articles}
         new_count = 0
-        filtered = 0
+        filtered_older = 0
+        filtered_newer = 0
 
         for item in data_list:
             gid = str(item.get('group_id', '') or item.get('item_id', ''))
@@ -302,9 +358,15 @@ class ToutiaoClient:
 
             publish_time = item.get('publish_time', 0) or item.get('behot_time', 0)
 
-            # 时间过滤
+            # 检测时间边界：文章早于 since_time，标记到达边界
             if self._since_time and publish_time and publish_time < self._since_time:
-                filtered += 1
+                self._reached_time_boundary = True
+                filtered_older += 1
+                continue
+
+            # 过滤晚于 until_time 的文章（太新，不在范围内）
+            if self._until_time and publish_time and publish_time > self._until_time:
+                filtered_newer += 1
                 continue
 
             article = ArticleItem(item)
@@ -313,8 +375,24 @@ class ToutiaoClient:
                 seen_ids.add(gid)
                 new_count += 1
 
-        log.info(f'解析完成: 新增 {new_count} 篇, 过滤 {filtered} 篇(早于时间点), 累计 {len(self._articles)} 篇')
+        parts = [f'新增 {new_count} 篇']
+        if filtered_older > 0:
+            parts.append(f'过滤 {filtered_older} 篇(早于范围)')
+        if filtered_newer > 0:
+            parts.append(f'过滤 {filtered_newer} 篇(晚于范围)')
+        parts.append(f'累计 {len(self._articles)} 篇')
+        parts.append(f'has_more={self._has_more}')
+        log.info(f'解析完成: {", ".join(parts)}')
         self._notify(f'获取到 {new_count} 篇文章', len(self._articles))
+
+    async def _scroll_to_bottom(self):
+        """模拟人工鼠标滚轮下滑，触发页面无限加载"""
+        try:
+            for _ in range(3):
+                await self._page.mouse.wheel(0, 800)
+                await self._page.wait_for_timeout(200)
+        except Exception as e:
+            log.warning(f'滚动操作异常: {e}')
 
     def _notify(self, message, count):
         """触发进度通知"""

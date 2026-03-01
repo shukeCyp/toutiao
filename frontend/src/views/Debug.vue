@@ -28,14 +28,20 @@
           </div>
         </div>
         <div class="control-row">
-          <label class="control-label">起始时间</label>
+          <label class="control-label">时间范围</label>
           <div class="control-input-group">
             <input
-              class="input"
+              class="input control-time-input"
               type="datetime-local"
               v-model="sinceTimeStr"
             />
-            <span class="control-hint">只采集该时间点之后发布的文章</span>
+            <span class="control-hint-sep">至</span>
+            <input
+              class="input control-time-input"
+              type="datetime-local"
+              v-model="untilTimeStr"
+            />
+            <span class="control-hint">会自动下滑加载直到超出范围</span>
           </div>
         </div>
         <div class="control-actions">
@@ -147,18 +153,18 @@ const tabs = [
 const activeTab = ref('monitor')
 
 // Monitor state
-const accountUrl = ref('')
+const accountUrl = ref('https://www.toutiao.com/c/user/token/MS4wLjABAAAAgwcVad_XPGQR0Ebh9wkbl5oTs8HBQRYaNlnLgSxctQ_Kg7R7-rF4mvWIUaPP4Ytv/?tab=article')
 const sinceTimeStr = ref('')
+const untilTimeStr = ref('')
 const collecting = ref(false)
 const progressMsg = ref('')
 const articles = ref([])
 const summary = ref(null)
 
-// 设置默认时间为今天 00:00
+// 设置默认时间范围为 2026.1.1 ~ 2026.1.31
 onMounted(() => {
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  sinceTimeStr.value = formatDatetimeLocal(today)
+  sinceTimeStr.value = '2026-01-01T00:00'
+  untilTimeStr.value = '2026-01-31T23:59'
 
   // 注册进度回调
   window.__onCollectProgress = (message, count) => {
@@ -175,10 +181,9 @@ function formatDatetimeLocal(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-function getSinceTimestamp() {
-  if (!sinceTimeStr.value) return 0
-  const d = new Date(sinceTimeStr.value)
-  return Math.floor(d.getTime() / 1000)
+function getTimestamp(str) {
+  if (!str) return 0
+  return Math.floor(new Date(str).getTime() / 1000)
 }
 
 async function startCollect() {
@@ -191,7 +196,8 @@ async function startCollect() {
   const result = await appStore.callApi(
     'collect_account',
     accountUrl.value.trim(),
-    getSinceTimestamp()
+    getTimestamp(sinceTimeStr.value),
+    getTimestamp(untilTimeStr.value)
   )
 
   collecting.value = false
@@ -301,6 +307,16 @@ function typeLabel(t) {
 
 .control-input-sm {
   max-width: 100px !important;
+}
+
+.control-time-input {
+  max-width: 220px !important;
+}
+
+.control-hint-sep {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .control-hint {
