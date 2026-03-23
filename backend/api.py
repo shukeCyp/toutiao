@@ -18,6 +18,7 @@ from article_downloader import ArticleDownloader, fetch_article_elements, read_d
 from rewrite_client import RewriteClient, SensitiveContentError
 from models import Account, Setting, Article, save_articles, db, _write_lock
 from task_manager import TaskManager
+from runtime_paths import configure_playwright_env
 
 log = get_logger('api')
 
@@ -247,6 +248,9 @@ class Api:
             from fingerprint import random_fingerprint
 
             fp = random_fingerprint()
+            bundled_browser_dir = configure_playwright_env()
+            if bundled_browser_dir:
+                log.info(f'使用内置 Playwright 浏览器目录: {bundled_browser_dir}')
             pw = await async_playwright().start()
             browser = await pw.chromium.launch(headless=True)
 

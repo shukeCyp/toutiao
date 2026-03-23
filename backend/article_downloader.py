@@ -18,6 +18,7 @@ from docx.shared import Inches, Pt
 from docx.oxml.ns import qn
 from logger import get_logger
 from fingerprint import random_fingerprint
+from runtime_paths import configure_playwright_env
 
 log = get_logger('downloader')
 
@@ -503,6 +504,9 @@ async def fetch_article_elements(article_url, headless=True, proxy_pool=''):
 
     proxy_config = _random_proxy(proxy_pool)
     fp = random_fingerprint()
+    bundled_browser_dir = configure_playwright_env()
+    if bundled_browser_dir:
+        log.info(f'使用内置 Playwright 浏览器目录: {bundled_browser_dir}')
     pw = await async_playwright().start()
     launch_kwargs = {
         'headless': headless,
