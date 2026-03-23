@@ -1,166 +1,127 @@
 <template>
   <div class="accounts-page">
-    <!-- Type Tabs + Actions -->
-    <div class="type-bar">
-      <div class="type-tabs">
-        <button
-          v-for="t in types"
-          :key="t"
-          class="type-tab"
-          :class="{ active: currentType === t }"
-          @click="switchType(t)"
-        >
-          {{ t }}
-          <span class="type-count">{{ typeCounts[t] ?? 0 }}</span>
-        </button>
-      </div>
-      <div class="type-actions">
-        <button class="btn btn-ghost btn-sm" @click="showAddType = true" v-if="!showAddType">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-            stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          添加类型
-        </button>
-        <form v-else class="add-type-form" @submit.prevent="addType">
-          <input
-            ref="typeInputRef"
-            class="input input-sm"
-            v-model="newTypeName"
-            placeholder="类型名称..."
-            @keydown.esc="showAddType = false"
-          />
-          <button class="btn btn-primary btn-sm" type="submit" :disabled="!newTypeName.trim()">确定</button>
-          <button class="btn btn-ghost btn-sm" type="button" @click="showAddType = false">取消</button>
-        </form>
-        <button
-          v-if="currentType && !showAddType"
-          class="btn btn-ghost btn-sm btn-danger-text"
-          @click="showDeleteTypeConfirm = true"
-        >
-          删除类型
-        </button>
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <button class="btn btn-primary btn-sm" @click="showBatchDialog = true">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        批量添加
+      </button>
+      <button
+        v-if="accounts.length > 0"
+        class="btn btn-sm"
+        @click="exportAccounts"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        导出链接
+      </button>
+      <button
+        v-if="accounts.length > 0"
+        class="btn btn-sm btn-danger-text"
+        @click="showClearConfirm = true"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+        全部删除
+      </button>
+      <span class="toolbar-sep"></span>
+      <span class="toolbar-count">{{ accounts.length }} 个账号</span>
+      <span class="toolbar-spacer"></span>
+      <div class="page-size-selector">
+        <span class="page-size-label">每页</span>
+        <select class="page-size-select" v-model.number="pageSize">
+          <option v-for="s in pageSizeOptions" :key="s" :value="s">{{ s }}</option>
+        </select>
+        <span class="page-size-label">条</span>
       </div>
     </div>
 
-    <!-- Content -->
-    <template v-if="currentType">
-      <!-- Toolbar -->
-      <div class="toolbar">
-        <button class="btn btn-primary btn-sm" @click="showBatchDialog = true">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-            stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          批量添加
-        </button>
-        <button
-          v-if="accounts.length > 0"
-          class="btn btn-sm btn-danger-text"
-          @click="showClearConfirm = true"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 6 5 6 21 6" />
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-          </svg>
-          全部删除
-        </button>
-        <span class="toolbar-sep"></span>
-        <span class="toolbar-count">{{ accounts.length }} 个账号</span>
-        <span class="toolbar-spacer"></span>
-        <div class="page-size-selector">
-          <span class="page-size-label">每页</span>
-          <select class="page-size-select" v-model.number="pageSize">
-            <option v-for="s in pageSizeOptions" :key="s" :value="s">{{ s }}</option>
-          </select>
-          <span class="page-size-label">条</span>
-        </div>
-      </div>
-
-      <!-- Account List (flat, no card) -->
-      <div v-if="accounts.length === 0" class="empty-state">
-        <p class="empty-text">暂无账号，点击「批量添加」开始</p>
-      </div>
-      <template v-else>
-        <ul class="account-list">
-          <li v-for="(account, idx) in pagedAccounts" :key="idx" class="account-item">
-            <div class="account-left">
-              <span class="account-index">{{ (currentPage - 1) * pageSize + idx + 1 }}</span>
-              <div class="account-avatar" :style="{ background: getAvatarColor((currentPage - 1) * pageSize + idx) }">
-                {{ account.charAt(0).toUpperCase() }}
-              </div>
-              <a class="account-name" :href="getAccountUrl(account)" @click.prevent="openAccount(account)" :title="account">{{ displayName(account) }}</a>
+    <!-- Account List -->
+    <div v-if="accounts.length === 0" class="empty-state">
+      <p class="empty-text">暂无账号，点击「批量添加」开始</p>
+    </div>
+    <template v-else>
+      <ul class="account-list">
+        <li v-for="(account, idx) in pagedAccounts" :key="idx" class="account-item">
+          <div class="account-left">
+            <span class="account-index">{{ (currentPage - 1) * pageSize + idx + 1 }}</span>
+            <div class="account-avatar" :style="{ background: getAvatarColor((currentPage - 1) * pageSize + idx) }">
+              {{ account.charAt(0).toUpperCase() }}
             </div>
-            <div class="account-actions">
-              <button class="action-btn action-open" @click="openAccount(account)" title="在浏览器中打开">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                  stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
-                打开
-              </button>
-              <button class="action-btn action-delete" @click="removeAccount(account)" title="删除该账号">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                  stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-                删除
-              </button>
-            </div>
-          </li>
-        </ul>
-
-        <!-- Pagination -->
-        <div v-if="totalPages > 1" class="pagination">
-          <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage = 1" title="首页">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="11 17 6 12 11 7" />
-              <polyline points="18 17 13 12 18 7" />
-            </svg>
-          </button>
-          <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage--" title="上一页">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
-          </button>
-
-          <template v-for="p in visiblePages" :key="p">
-            <span v-if="p === '...'" class="page-ellipsis">...</span>
-            <button v-else class="page-btn page-num" :class="{ active: currentPage === p }" @click="currentPage = p">
-              {{ p }}
+            <a class="account-name" :href="getAccountUrl(account)" @click.prevent="openAccount(account)" :title="account">{{ displayName(account) }}</a>
+          </div>
+          <div class="account-actions">
+            <button class="action-btn action-open" @click="openAccount(account)" title="在浏览器中打开">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+              打开
             </button>
-          </template>
+            <button class="action-btn action-delete" @click="removeAccount(account)" title="删除该账号">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+              删除
+            </button>
+          </div>
+        </li>
+      </ul>
 
-          <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage++" title="下一页">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="9 18 15 12 9 6" />
-            </svg>
+      <!-- Pagination -->
+      <div v-if="totalPages > 1" class="pagination">
+        <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage = 1" title="首页">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="11 17 6 12 11 7" />
+            <polyline points="18 17 13 12 18 7" />
+          </svg>
+        </button>
+        <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage--" title="上一页">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+
+        <template v-for="p in visiblePages" :key="p">
+          <span v-if="p === '...'" class="page-ellipsis">...</span>
+          <button v-else class="page-btn page-num" :class="{ active: currentPage === p }" @click="currentPage = p">
+            {{ p }}
           </button>
-          <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage = totalPages" title="末页">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="13 17 18 12 13 7" />
-              <polyline points="6 17 11 12 6 7" />
-            </svg>
-          </button>
-          <span class="page-info">{{ currentPage }} / {{ totalPages }}</span>
-        </div>
-      </template>
+        </template>
+
+        <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage++" title="下一页">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+        <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage = totalPages" title="末页">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="13 17 18 12 13 7" />
+            <polyline points="6 17 11 12 6 7" />
+          </svg>
+        </button>
+        <span class="page-info">{{ currentPage }} / {{ totalPages }}</span>
+      </div>
     </template>
-
-    <!-- No type -->
-    <div v-else class="empty-state">
-      <p class="empty-text">请先添加一个类型</p>
-    </div>
 
     <!-- Batch Add Dialog -->
     <Teleport to="body">
@@ -170,7 +131,7 @@
       <transition name="dialog">
         <div v-if="showBatchDialog" class="dialog">
           <div class="dialog-header">
-            <h3>批量添加账号 — {{ currentType }}</h3>
+            <h3>批量添加账号</h3>
             <button class="btn-icon" @click="closeBatchDialog">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                 stroke-linecap="round" stroke-linejoin="round">
@@ -201,38 +162,6 @@
       </transition>
     </Teleport>
 
-    <!-- Delete Type Confirm Dialog -->
-    <Teleport to="body">
-      <transition name="backdrop">
-        <div v-if="showDeleteTypeConfirm" class="dialog-backdrop" @click="showDeleteTypeConfirm = false"></div>
-      </transition>
-      <transition name="dialog">
-        <div v-if="showDeleteTypeConfirm" class="dialog dialog-sm">
-          <div class="dialog-header">
-            <h3>确认删除</h3>
-            <button class="btn-icon" @click="showDeleteTypeConfirm = false">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                stroke-linecap="round" stroke-linejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          </div>
-          <div class="dialog-body confirm-body">
-            <p>确定要删除类型「<strong>{{ currentType }}</strong>」吗？</p>
-            <p class="confirm-hint">该类型下的所有账号数据将被永久删除，此操作不可恢复。</p>
-          </div>
-          <div class="dialog-footer">
-            <span></span>
-            <div class="dialog-footer-actions">
-              <button class="btn btn-sm" @click="showDeleteTypeConfirm = false">取消</button>
-              <button class="btn btn-sm btn-danger" @click="confirmRemoveType">确认删除</button>
-            </div>
-          </div>
-        </div>
-      </transition>
-    </Teleport>
-
     <!-- Clear All Confirm Dialog -->
     <Teleport to="body">
       <transition name="backdrop">
@@ -251,7 +180,7 @@
             </button>
           </div>
           <div class="dialog-body confirm-body">
-            <p>确定要清空「<strong>{{ currentType }}</strong>」下的全部 <strong>{{ accounts.length }}</strong> 个账号吗？</p>
+            <p>确定要清空全部 <strong>{{ accounts.length }}</strong> 个账号吗？</p>
             <p class="confirm-hint">此操作不可恢复。</p>
           </div>
           <div class="dialog-footer">
@@ -275,15 +204,6 @@ import { useToast } from '../composables/useToast'
 const appStore = useAppStore()
 const { toast } = useToast()
 
-// Types
-const types = ref([])
-const currentType = ref('')
-const typeCounts = ref({})
-const showAddType = ref(false)
-const newTypeName = ref('')
-const typeInputRef = ref(null)
-
-// Accounts
 const accounts = ref([])
 const loading = ref(false)
 
@@ -319,12 +239,10 @@ const visiblePages = computed(() => {
   return pages
 })
 
-// Reset page when switching type or changing page size
 watch(pageSize, () => { currentPage.value = 1 })
 
 // Dialogs
 const showBatchDialog = ref(false)
-const showDeleteTypeConfirm = ref(false)
 const showClearConfirm = ref(false)
 const newAccountText = ref('')
 const textareaRef = ref(null)
@@ -347,10 +265,6 @@ const batchCount = computed(() => {
   return newAccountText.value.trim().split('\n').filter(l => l.trim()).length
 })
 
-watch(showAddType, (val) => {
-  if (val) nextTick(() => typeInputRef.value?.focus())
-})
-
 watch(showBatchDialog, (val) => {
   if (val) {
     nextTick(() => textareaRef.value?.focus())
@@ -358,89 +272,29 @@ watch(showBatchDialog, (val) => {
 })
 
 onMounted(() => {
-  loadTypes()
+  loadAccounts()
 })
 
-async function loadTypes() {
-  const result = await appStore.callApi('get_account_types')
-  if (result && result.success) {
-    types.value = result.types
-    for (const t of result.types) {
-      const r = await appStore.callApi('get_accounts', t)
-      if (r && r.success) {
-        typeCounts.value[t] = r.accounts.length
-      }
-    }
-    if (types.value.length > 0 && !currentType.value) {
-      switchType(types.value[0])
-    }
-  }
-}
-
-async function addType() {
-  const name = newTypeName.value.trim()
-  if (!name) return
-  const result = await appStore.callApi('add_account_type', name)
-  if (result && result.success) {
-    types.value.push(name)
-    typeCounts.value[name] = 0
-    newTypeName.value = ''
-    showAddType.value = false
-    switchType(name)
-    toast.success(`类型「${name}」创建成功`)
-  } else if (result) {
-    toast.error(result.message)
-  }
-}
-
-async function confirmRemoveType() {
-  if (!currentType.value) return
-  const name = currentType.value
-  showDeleteTypeConfirm.value = false
-  const result = await appStore.callApi('remove_account_type', name)
-  if (result && result.success) {
-    types.value = types.value.filter(t => t !== name)
-    delete typeCounts.value[name]
-    currentType.value = types.value.length > 0 ? types.value[0] : ''
-    if (currentType.value) {
-      await loadAccounts()
-    } else {
-      accounts.value = []
-    }
-    toast.success(`类型「${name}」已删除`)
-  }
-}
-
-async function switchType(t) {
-  currentType.value = t
-  currentPage.value = 1
-  await loadAccounts()
-}
-
 async function loadAccounts() {
-  if (!currentType.value) return
   loading.value = true
-  const result = await appStore.callApi('get_accounts', currentType.value)
+  const result = await appStore.callApi('get_accounts')
   if (result && result.success) {
     accounts.value = result.accounts
-    typeCounts.value[currentType.value] = result.accounts.length
   }
   loading.value = false
 }
 
 async function addAccounts() {
   const text = newAccountText.value.trim()
-  if (!text || !currentType.value) return
+  if (!text) return
 
   loading.value = true
-  const result = await appStore.callApi('add_accounts', currentType.value, text)
+  const result = await appStore.callApi('add_accounts', text)
   loading.value = false
 
   if (result) {
     accounts.value = result.accounts
-    typeCounts.value[currentType.value] = result.accounts.length
 
-    // Show result via toast
     if (result.added > 0) {
       toast.success(result.message)
     } else if (result.invalid > 0) {
@@ -457,15 +311,13 @@ async function addAccounts() {
 }
 
 async function clearAllAccounts() {
-  if (!currentType.value) return
   showClearConfirm.value = false
   loading.value = true
-  const result = await appStore.callApi('clear_accounts', currentType.value)
+  const result = await appStore.callApi('clear_accounts')
   loading.value = false
 
   if (result && result.success) {
     accounts.value = []
-    typeCounts.value[currentType.value] = 0
     toast.success('已清空全部账号')
   } else if (result) {
     toast.error(result.message)
@@ -478,14 +330,11 @@ function closeBatchDialog() {
 }
 
 function displayName(account) {
-  // 从 URL 中提取 token 部分作为展示名
   const prefix = 'https://www.toutiao.com/c/user/token/'
   if (account.startsWith(prefix)) {
     let token = account.slice(prefix.length)
-    // 去掉尾部参数
     const qIdx = token.indexOf('?')
     if (qIdx !== -1) token = token.substring(0, qIdx)
-    // 去掉尾部斜杠
     token = token.replace(/\/+$/, '')
     return token || account
   }
@@ -503,13 +352,26 @@ async function openAccount(account) {
 
 async function removeAccount(account) {
   loading.value = true
-  const result = await appStore.callApi('remove_account', currentType.value, account)
+  const result = await appStore.callApi('remove_account', account)
   loading.value = false
 
   if (result && result.success) {
     accounts.value = result.accounts
-    typeCounts.value[currentType.value] = result.accounts.length
     toast.success('已删除')
+  } else if (result) {
+    toast.error(result.message)
+  }
+}
+
+async function exportAccounts() {
+  if (accounts.value.length === 0) return
+
+  loading.value = true
+  const result = await appStore.callApi('export_accounts')
+  loading.value = false
+
+  if (result && result.success) {
+    toast.success(result.message)
   } else if (result) {
     toast.error(result.message)
   }
@@ -521,99 +383,6 @@ async function removeAccount(account) {
   max-width: 100%;
 }
 
-.page-header-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-}
-
-/* ---- Type Bar ---- */
-.type-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  margin-bottom: var(--space-5);
-  flex-wrap: wrap;
-}
-
-.type-tabs {
-  display: flex;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
-
-.type-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--text-sm);
-  font-weight: 450;
-  font-family: var(--font-sans);
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  white-space: nowrap;
-}
-
-.type-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.type-tab.active {
-  background: var(--bg-active);
-  color: var(--text-primary);
-  border-color: var(--surface-border);
-}
-
-.type-count {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  background: var(--bg-hover);
-  padding: 0 6px;
-  border-radius: 9999px;
-  min-width: 18px;
-  text-align: center;
-}
-
-.type-tab.active .type-count {
-  background: var(--surface-border);
-  color: var(--text-secondary);
-}
-
-.type-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.add-type-form {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-}
-
-.input-sm {
-  height: 28px;
-  font-size: var(--text-xs);
-  padding: var(--space-1) var(--space-3);
-  width: 120px;
-}
-
-.btn-danger-text {
-  color: var(--text-muted);
-}
-.btn-danger-text:hover {
-  color: var(--error) !important;
-  background: rgba(239, 68, 68, 0.1) !important;
-}
-
-/* ---- Toolbar ---- */
 .toolbar {
   display: flex;
   align-items: center;
@@ -637,7 +406,6 @@ async function removeAccount(account) {
   flex: 1;
 }
 
-/* Page size selector */
 .page-size-selector {
   display: flex;
   align-items: center;
@@ -673,12 +441,14 @@ async function removeAccount(account) {
   border-color: var(--accent-primary);
 }
 
-.page-size-select option {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+.btn-danger-text {
+  color: var(--text-muted);
+}
+.btn-danger-text:hover {
+  color: var(--error) !important;
+  background: rgba(239, 68, 68, 0.1) !important;
 }
 
-/* ---- Empty ---- */
 .empty-state {
   padding: var(--space-10) 0;
 }
@@ -688,7 +458,6 @@ async function removeAccount(account) {
   color: var(--text-muted);
 }
 
-/* ---- Account List (flat) ---- */
 .account-list {
   list-style: none;
   padding: 0;
@@ -752,7 +521,6 @@ async function removeAccount(account) {
   font-family: var(--font-mono);
 }
 
-/* Action buttons */
 .account-actions {
   display: flex;
   align-items: center;
@@ -794,7 +562,6 @@ async function removeAccount(account) {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* ---- Pagination ---- */
 .pagination {
   display: flex;
   align-items: center;
@@ -851,7 +618,6 @@ async function removeAccount(account) {
   margin-left: var(--space-3);
 }
 
-/* Dialog close btn-icon */
 .btn-icon {
   width: 28px;
   height: 28px;
@@ -872,7 +638,6 @@ async function removeAccount(account) {
   color: var(--text-primary);
 }
 
-/* ---- Dialog ---- */
 .dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -907,11 +672,6 @@ async function removeAccount(account) {
   font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
-}
-
-.dialog-header .btn-icon {
-  opacity: 1;
-  color: var(--text-muted);
 }
 
 .dialog-body {
@@ -974,10 +734,6 @@ async function removeAccount(account) {
   line-height: 1.5;
 }
 
-.confirm-body strong {
-  color: var(--text-primary);
-}
-
 .confirm-hint {
   margin-top: var(--space-2);
   font-size: var(--text-xs) !important;
@@ -995,7 +751,6 @@ async function removeAccount(account) {
   border-color: #dc2626;
 }
 
-/* ---- Transitions ---- */
 .backdrop-enter-active,
 .backdrop-leave-active {
   transition: opacity 0.2s ease;

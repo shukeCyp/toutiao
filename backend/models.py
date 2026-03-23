@@ -38,8 +38,14 @@ class BaseModel(Model):
 class Account(BaseModel):
     """对标账号表"""
     url = CharField(unique=True, index=True, help_text='账号链接')
-    category = CharField(default='', index=True, help_text='类型/分类')
-    created_at = DateTimeField(default=datetime.now, help_text='添加时间')
+    name = CharField(default='', help_text='昵称')
+    avatar = CharField(default='', help_text='头像URL')
+    fans_count = CharField(default='', help_text='粉丝数')
+    like_count = CharField(default='', help_text='获赞数')
+    follow_count = CharField(default='', help_text='关注数')
+    auth_info = CharField(default='', help_text='认证信息')
+    created_at = DateTimeField(default=datetime.now, help_text='创建时间')
+    updated_at = DateTimeField(default=datetime.now, help_text='更新时间')
 
     class Meta:
         table_name = 'accounts'
@@ -49,8 +55,14 @@ class Account(BaseModel):
         return {
             'id': self.id,
             'url': self.url,
-            'category': self.category,
+            'name': self.name,
+            'avatar': self.avatar,
+            'fans_count': self.fans_count,
+            'like_count': self.like_count,
+            'follow_count': self.follow_count,
+            'auth_info': self.auth_info,
             'created_at': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else '',
+            'updated_at': self.updated_at.strftime('%Y-%m-%d %H:%M:%S') if self.updated_at else '',
         }
 
 

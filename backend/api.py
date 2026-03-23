@@ -14,7 +14,7 @@ import webview
 from logger import get_logger
 from browser_manager import BrowserManager
 from toutiao_client import ToutiaoClient
-from article_downloader import ArticleDownloader, fetch_article_elements, read_docx_elements, generate_docx, safe_filename
+from article_downloader import ArticleDownloader, fetch_article_elements, read_docx_elements, generate_docx, safe_filename, _is_huiwen_url, _is_people_url, is_supported_url
 from rewrite_client import RewriteClient, SensitiveContentError
 from models import Account, Setting, Article, save_articles, db, _write_lock
 from task_manager import TaskManager
@@ -27,11 +27,13 @@ class Api:
         'timeout': 30000,
         'collectTimeout': 60,
         'rewriteWorkers': 10,
+        'maxWordCount': 1000,
         'apiBase': '',
         'apiKey': '',
         'model': '',
         'articleSavePath': '',
         'rewriteSavePath': '',
+        'proxyPool': '',
     }
 
     def __init__(self):
@@ -128,81 +130,25 @@ class Api:
 
     ACCOUNT_URL_PREFIX = 'https://www.toutiao.com/c/user/token/'
 
-    def get_account_types(self):
-        """获取所有账号类型（从 accounts 表的 category 去重）"""
+    def get_accounts(self):
+        """获取所有对标账号列表"""
         try:
             db.connect(reuse_if_open=True)
-            rows = (Account.select(Account.category)
-                    .distinct()
-                    .order_by(Account.category))
-            types = [r.category for r in rows if r.category]
-            return {'success': True, 'types': types}
-        except Exception as e:
-            return {'success': False, 'message': str(e), 'types': []}
-
-    def add_account_type(self, type_name):
-        """添加新的账号类型（插入一条占位记录不需要，类型由账号的 category 决定，但为了兼容前端逻辑，检查是否已有该类型）"""
-        try:
-            type_name = type_name.strip()
-            if not type_name:
-                return {'success': False, 'message': '类型名称不能为空'}
-            db.connect(reuse_if_open=True)
-            exists = Account.select().where(Account.category == type_name).count() > 0
-            if exists:
-                return {'success': False, 'message': '该类型已存在'}
-            # 插入一条空 URL 占位，标记类型存在
-            with _write_lock:
-                Account.create(url=f'__placeholder__{type_name}', category=type_name)
-            log.info(f'创建账号类型: {type_name}')
-            return {'success': True, 'message': f'类型「{type_name}」创建成功'}
-        except Exception as e:
-            log.error(f'创建类型失败: {e}')
-            return {'success': False, 'message': str(e)}
-
-    def remove_account_type(self, type_name):
-        """删除一个账号类型及其所有账号"""
-        try:
-            type_name = type_name.strip()
-            db.connect(reuse_if_open=True)
-            with _write_lock:
-                count = Account.delete().where(Account.category == type_name).execute()
-            log.info(f'删除账号类型: {type_name} ({count} 条)')
-            return {'success': True, 'message': f'类型「{type_name}」已删除'}
-        except Exception as e:
-            log.error(f'删除类型失败: {e}')
-            return {'success': False, 'message': str(e)}
-
-    def get_accounts(self, type_name):
-        """读取某个类型的对标账号列表"""
-        try:
-            type_name = type_name.strip()
-            db.connect(reuse_if_open=True)
-            rows = (Account.select()
-                    .where((Account.category == type_name) & (~Account.url.startswith('__placeholder__')))
-                    .order_by(Account.created_at))
+            rows = Account.select().order_by(Account.created_at)
             accounts = [r.url for r in rows]
             return {'success': True, 'accounts': accounts}
         except Exception as e:
             return {'success': False, 'message': str(e), 'accounts': []}
 
-    def _read_accounts(self, type_name):
-        """内部方法：读取某个类型的账号 URL 列表"""
-        db.connect(reuse_if_open=True)
-        rows = (Account.select(Account.url)
-                .where((Account.category == type_name) & (~Account.url.startswith('__placeholder__')))
-                .order_by(Account.created_at))
-        return [r.url for r in rows]
-
-    def add_accounts(self, type_name, text):
+    def add_accounts(self, text):
         """批量添加对标账号"""
         try:
-            type_name = type_name.strip()
             raw_items = [l.strip() for l in text.strip().splitlines() if l.strip()]
             if not raw_items:
                 return {'success': False, 'message': '内容不能为空'}
 
             db.connect(reuse_if_open=True)
-            existing_urls = set(self._read_accounts(type_name))
+            existing = {r.url for r in Account.select(Account.url)}
 
             added = []
             skipped = []
@@ -210,23 +156,18 @@ class Api:
             for item in raw_items:
                 if not item.startswith(self.ACCOUNT_URL_PREFIX):
                     invalid.append(item)
-                    continue
-                if item in existing_urls:
+                elif item in existing:
                     skipped.append(item)
                 else:
                     added.append(item)
-                    existing_urls.add(item)
+                    existing.add(item)
 
             if added:
                 with _write_lock, db.atomic():
                     for url in added:
-                        Account.create(url=url, category=type_name)
-                    # 删除占位记录（如果有真实账号了）
-                    Account.delete().where(
-                        (Account.category == type_name) & (Account.url.startswith('__placeholder__'))
-                    ).execute()
+                        Account.create(url=url, category='')
 
-            all_accounts = self._read_accounts(type_name)
+            all_accounts = [r.url for r in Account.select().order_by(Account.created_at)]
 
             parts = []
             if added:
@@ -236,7 +177,6 @@ class Api:
             if invalid:
                 parts.append(f'过滤 {len(invalid)} 个无效链接')
             msg = '，'.join(parts) if parts else '没有可添加的账号'
-            log.info(f'[{type_name}] 批量添加: {msg} (输入 {len(raw_items)} 条)')
 
             return {
                 'success': len(added) > 0 or (len(added) == 0 and len(invalid) == 0),
@@ -249,36 +189,314 @@ class Api:
         except Exception as e:
             return {'success': False, 'message': str(e)}
 
-    def clear_accounts(self, type_name):
-        """清空某个类型下的所有账号"""
+    def clear_accounts(self):
+        """清空所有账号"""
         try:
-            type_name = type_name.strip()
             db.connect(reuse_if_open=True)
             with _write_lock:
-                Account.delete().where(
-                    (Account.category == type_name) & (~Account.url.startswith('__placeholder__'))
-                ).execute()
-            log.info(f'清空账号类型: {type_name}')
+                Account.delete().execute()
+            log.info('清空所有账号')
             return {'success': True, 'message': '已清空全部账号', 'accounts': []}
         except Exception as e:
             log.error(f'清空账号失败: {e}')
             return {'success': False, 'message': str(e)}
 
-    def remove_account(self, type_name, account):
-        """删除某个类型下的一个对标账号"""
+    def remove_account(self, account):
+        """删除一个对标账号"""
         try:
-            type_name = type_name.strip()
             account = account.strip()
             db.connect(reuse_if_open=True)
             with _write_lock:
-                rows = Account.delete().where(
-                    (Account.category == type_name) & (Account.url == account)
-                ).execute()
+                rows = Account.delete().where(Account.url == account).execute()
             if rows:
-                all_accounts = self._read_accounts(type_name)
+                all_accounts = [r.url for r in Account.select().order_by(Account.created_at)]
                 return {'success': True, 'message': '删除成功', 'accounts': all_accounts}
             return {'success': False, 'message': '账号不存在'}
         except Exception as e:
+            return {'success': False, 'message': str(e)}
+
+    def export_accounts(self):
+        """导出所有对标账号链接为txt文件"""
+        try:
+            db.connect(reuse_if_open=True)
+            accounts = [r.url for r in Account.select().order_by(Account.created_at)]
+            if not accounts:
+                return {'success': False, 'message': '没有账号可导出'}
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'accounts_{timestamp}.txt'
+
+            desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+            filepath = os.path.join(desktop, filename)
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(accounts))
+
+            log.info(f'导出账号 -> {filepath}')
+            return {'success': True, 'message': f'已导出 {len(accounts)} 个账号', 'filepath': filepath}
+        except Exception as e:
+            log.error(f'导出账号失败: {e}')
+            return {'success': False, 'message': str(e)}
+
+    async def fetch_account_profile(self, url):
+        """使用Playwright获取账号详细信息"""
+        try:
+            log.info(f'开始获取账号信息: {url}')
+            from playwright.async_api import async_playwright
+            from fingerprint import random_fingerprint
+
+            fp = random_fingerprint()
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+
+            try:
+                context = await browser.new_context(
+                    viewport=fp['viewport'],
+                    user_agent=fp['user_agent'],
+                )
+                page = await context.new_page()
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)
+
+                # 提取账号信息
+                profile = await page.evaluate('''() => {
+                    const info = document.querySelector('.profile-info-l');
+                    if (!info) return null;
+
+                    const name = info.querySelector('.name')?.textContent?.trim() || '';
+                    const avatar = info.querySelector('.avatar img')?.src || '';
+                    const stats = info.querySelectorAll('.stat-item .num');
+                    const like_count = stats[0]?.textContent?.trim() || '';
+                    const fans_count = stats[1]?.textContent?.trim() || '';
+                    const follow_count = stats[2]?.textContent?.trim() || '';
+                    const auth_info = info.querySelector('.user-auth-info')?.textContent?.replace('认证：', '').trim() || '';
+
+                    return { name, avatar, like_count, fans_count, follow_count, auth_info };
+                }''')
+
+                await context.close()
+
+                if not profile:
+                    log.warning(f'未能获取账号信息: {url}')
+                    return {'success': False, 'message': '未能获取账号信息'}
+
+                log.info(f'成功获取账号信息: {profile.get("name")} - {url}')
+                return {'success': True, 'profile': profile}
+
+            finally:
+                await browser.close()
+                await pw.stop()
+
+        except Exception as e:
+            log.error(f'获取账号信息失败: {url} - {e}')
+            return {'success': False, 'message': str(e)}
+
+    def fetch_and_save_account_profile(self, url):
+        """获取账号信息并立即保存到数据库"""
+        try:
+            log.info('='*60)
+            log.info(f'[线程 {threading.current_thread().name}] 开始处理账号: {url}')
+
+            # 检查是否已存在
+            db.connect(reuse_if_open=True)
+            existing = Account.get_or_none(Account.url == url)
+            if existing:
+                log.info(f'[线程 {threading.current_thread().name}] 账号已存在数据库，跳过')
+                log.info(f'  - 昵称: {existing.name}')
+                log.info(f'  - 粉丝数: {existing.fans_count}')
+                log.info('='*60)
+                return {'success': True, 'message': '账号已存在', 'skipped': True, 'profile': existing.to_dict()}
+
+            # 获取信息
+            log.info(f'[线程 {threading.current_thread().name}] 正在访问账号页面...')
+            result = self._run_async(self.fetch_account_profile(url), timeout=60)
+            if not result or not result.get('success'):
+                log.error(f'[线程 {threading.current_thread().name}] 获取失败: {result.get("message", "未知错误")}')
+                log.info('='*60)
+                return {'success': False, 'message': result.get('message', '获取失败')}
+
+            profile = result['profile']
+            log.info(f'[线程 {threading.current_thread().name}] 成功提取账号信息:')
+            log.info(f'  - 昵称: {profile.get("name")}')
+            log.info(f'  - 粉丝数: {profile.get("fans_count")}')
+            log.info(f'  - 获赞数: {profile.get("like_count")}')
+            log.info(f'  - 关注数: {profile.get("follow_count")}')
+            log.info(f'  - 认证: {profile.get("auth_info") or "无"}')
+
+            # 保存到数据库
+            log.info(f'[线程 {threading.current_thread().name}] 正在保存到数据库...')
+            from datetime import datetime
+            with _write_lock, db.atomic():
+                Account.create(
+                    url=url,
+                    name=profile.get('name', ''),
+                    avatar=profile.get('avatar', ''),
+                    fans_count=profile.get('fans_count', ''),
+                    like_count=profile.get('like_count', ''),
+                    follow_count=profile.get('follow_count', ''),
+                    auth_info=profile.get('auth_info', ''),
+                )
+
+            log.info(f'[线程 {threading.current_thread().name}] ✓ 账号信息已成功保存到数据库')
+            log.info('='*60)
+            return {'success': True, 'message': '获取并保存成功', 'profile': profile}
+
+        except Exception as e:
+            log.error(f'[线程 {threading.current_thread().name}] 处理账号时发生错误: {str(e)}')
+            log.info('='*60)
+            return {'success': False, 'message': str(e)}
+
+    def fetch_accounts_batch(self, urls, workers=10):
+        """批量获取账号信息（多线程）"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        log.info(f'开始批量获取账号信息，共 {len(urls)} 个账号，使用 {workers} 个线程')
+
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_url = {executor.submit(self.fetch_and_save_account_profile, url): url for url in urls}
+
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    result = future.result()
+                    results.append({'url': url, 'result': result})
+                except Exception as e:
+                    log.error(f'处理账号异常: {url} - {e}')
+                    results.append({'url': url, 'result': {'success': False, 'message': str(e)}})
+
+        success = sum(1 for r in results if r['result'].get('success') and not r['result'].get('skipped'))
+        skipped = sum(1 for r in results if r['result'].get('skipped'))
+        failed = sum(1 for r in results if not r['result'].get('success'))
+
+        log.info(f'批量获取完成 - 成功: {success}, 跳过: {skipped}, 失败: {failed}')
+
+        return {
+            'success': True,
+            'total': len(urls),
+            'success_count': success,
+            'skipped_count': skipped,
+            'failed_count': failed,
+            'results': results
+        }
+
+    def fetch_account_profile_sync(self, url):
+        """同步版本：获取账号信息"""
+        return self._run_async(self.fetch_account_profile(url), timeout=60)
+
+    def save_account_profile(self, url, profile_data):
+        """保存账号信息到数据库"""
+        try:
+            db.connect(reuse_if_open=True)
+            from datetime import datetime
+            with _write_lock, db.atomic():
+                AccountProfile.insert(
+                    url=url,
+                    name=profile_data.get('name', ''),
+                    avatar=profile_data.get('avatar', ''),
+                    fans_count=profile_data.get('fans_count', ''),
+                    like_count=profile_data.get('like_count', ''),
+                    follow_count=profile_data.get('follow_count', ''),
+                    auth_info=profile_data.get('auth_info', ''),
+                    updated_at=datetime.now()
+                ).on_conflict(
+                    conflict_target=[AccountProfile.url],
+                    update={
+                        AccountProfile.name: profile_data.get('name', ''),
+                        AccountProfile.avatar: profile_data.get('avatar', ''),
+                        AccountProfile.fans_count: profile_data.get('fans_count', ''),
+                        AccountProfile.like_count: profile_data.get('like_count', ''),
+                        AccountProfile.follow_count: profile_data.get('follow_count', ''),
+                        AccountProfile.auth_info: profile_data.get('auth_info', ''),
+                        AccountProfile.updated_at: datetime.now()
+                    }
+                ).execute()
+            return {'success': True}
+        except Exception as e:
+            log.error(f'保存账号信息失败: {e}')
+            return {'success': False, 'message': str(e)}
+
+    def get_account_profiles(self):
+        """获取所有账号详细信息"""
+        try:
+            db.connect(reuse_if_open=True)
+            profiles = [p.to_dict() for p in Account.select().order_by(Account.created_at)]
+            return {'success': True, 'profiles': profiles}
+        except Exception as e:
+            return {'success': False, 'message': str(e), 'profiles': []}
+
+    def import_accounts(self, data):
+        """导入账号数据（JSON格式）"""
+        try:
+            db.connect(reuse_if_open=True)
+            imported = 0
+            skipped = 0
+
+            with _write_lock, db.atomic():
+                for item in data:
+                    url = item.get('url')
+                    if not url:
+                        continue
+
+                    existing = Account.get_or_none(Account.url == url)
+                    if existing:
+                        skipped += 1
+                        continue
+
+                    Account.create(
+                        url=url,
+                        name=item.get('name', ''),
+                        avatar=item.get('avatar', ''),
+                        fans_count=item.get('fans_count', ''),
+                        like_count=item.get('like_count', ''),
+                        follow_count=item.get('follow_count', ''),
+                        auth_info=item.get('auth_info', ''),
+                    )
+                    imported += 1
+
+            log.info(f'导入账号完成 - 成功: {imported}, 跳过: {skipped}')
+            return {'success': True, 'message': f'成功导入 {imported} 个账号，跳过 {skipped} 个重复'}
+        except Exception as e:
+            log.error(f'导入账号失败: {e}')
+            return {'success': False, 'message': str(e)}
+
+    def delete_all_accounts(self):
+        """删除所有账号"""
+        try:
+            db.connect(reuse_if_open=True)
+            with _write_lock:
+                count = Account.delete().execute()
+            log.info(f'删除所有账号: {count} 条')
+            return {'success': True, 'message': f'已删除 {count} 个账号'}
+        except Exception as e:
+            log.error(f'删除账号失败: {e}')
+            return {'success': False, 'message': str(e)}
+
+    def export_accounts_json(self):
+        """导出所有账号为JSON文件到桌面"""
+        try:
+            db.connect(reuse_if_open=True)
+            profiles = [p.to_dict() for p in Account.select().order_by(Account.created_at)]
+
+            if not profiles:
+                return {'success': False, 'message': '没有数据可导出'}
+
+            import json
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'accounts_{timestamp}.json'
+
+            desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+            filepath = os.path.join(desktop, filename)
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(profiles, f, ensure_ascii=False, indent=2)
+
+            log.info(f'导出账号JSON: {filepath}')
+            return {'success': True, 'message': f'已导出 {len(profiles)} 个账号到桌面', 'filepath': filepath}
+        except Exception as e:
+            log.error(f'导出账号JSON失败: {e}')
             return {'success': False, 'message': str(e)}
 
     # ------------------------------------------
@@ -509,6 +727,35 @@ class Api:
         """停止批量任务"""
         return self._task_manager.stop_task()
 
+    def start_collect_all(self, article_count=0, since_time=0, until_time=0):
+        """
+        启动抓取所有账号的任务
+        article_count: 抓取文章数量，0 表示不限
+        since_time: 时间范围起点
+        until_time: 时间范围终点
+        """
+        try:
+            db.connect(reuse_if_open=True)
+            accounts = [r.url for r in Account.select().order_by(Account.created_at)]
+
+            if not accounts:
+                return {'success': False, 'message': '没有可用的账号'}
+
+            collect_timeout = self._settings.get('collectTimeout', 60)
+            headless = self._settings.get('headless', False)
+
+            task_items = [
+                {'url': url, 'category': '', 'max_articles': article_count}
+                for url in accounts
+            ]
+
+            log.info(f'抓取所有账号: accounts={len(accounts)}, article_limit={article_count}, since={since_time}, until={until_time}')
+            result = self._task_manager.start_task(task_items, since_time=since_time, until_time=until_time, collect_timeout=collect_timeout, headless=headless)
+            return result
+        except Exception as e:
+            log.error(f'启动抓取失败: {e}')
+            return {'success': False, 'message': str(e)}
+
     # ------------------------------------------
     # 文章数据库 API
     # ------------------------------------------
@@ -598,6 +845,7 @@ class Api:
                 return {'success': False, 'message': '文章链接为空'}
 
             headless = self._settings.get('headless', False)
+            proxy_pool = self._settings.get('proxyPool', '')
             log.info(f'下载文章: id={article_id}, title={article.title[:30]}')
 
             async def _do_download():
@@ -608,6 +856,7 @@ class Api:
                     category=article.category,
                     title=article.title,
                     headless=headless,
+                    proxy_pool=proxy_pool,
                 )
                 return doc_path
 
@@ -672,6 +921,7 @@ class Api:
                 return {'success': False, 'message': '请先在设置中配置文章保存路径'}
 
             headless = self._settings.get('headless', False)
+            proxy_pool = self._settings.get('proxyPool', '')
 
             db.connect(reuse_if_open=True)
             results = []
@@ -710,6 +960,7 @@ class Api:
                             category=article.category,
                             title=article.title,
                             headless=headless,
+                            proxy_pool=proxy_pool,
                         )
                         return doc_path
 
@@ -761,7 +1012,14 @@ class Api:
             if not article.url:
                 return {'success': False, 'message': '文章链接为空'}
 
+            if not article.doc_path and not is_supported_url(article.url):
+                log.info(f'不支持的域名，删除文章: id={article_id}, url={article.url[:80]}')
+                with _write_lock:
+                    Article.delete().where(Article.id == article_id).execute()
+                return {'success': True, 'message': '不支持的域名，已自动删除', 'deleted': True}
+
             headless = self._settings.get('headless', False)
+            proxy_pool = self._settings.get('proxyPool', '')
             log.info(f'改写文章: id={article_id}, title={article.title[:30]}')
 
             # 1. 提取文章元素：优先读本地 docx，没有则从网页抓取
@@ -771,7 +1029,7 @@ class Api:
             else:
                 log.info(f'本地无文件，从网页抓取: {article.url}')
                 async def _fetch():
-                    return await fetch_article_elements(article.url, headless=headless)
+                    return await fetch_article_elements(article.url, headless=headless, proxy_pool=proxy_pool)
                 elements = self._run_async(_fetch())
 
             # 2. 分离文字段落
@@ -785,17 +1043,18 @@ class Api:
             if not paragraphs:
                 return {'success': False, 'message': '文章没有可改写的文字内容'}
 
-            # 2.5. 字数不足 1000 的文章直接删除
+            # 2.5. 字数不足的文章直接删除
             total_chars = sum(len(p) for p in paragraphs)
-            if total_chars < 1000:
+            max_word_count = self._settings.get('maxWordCount', 1000)
+            if total_chars < max_word_count:
                 # #region agent log
                 _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
-                open(_dbg, 'a').write(json.dumps({"location":"api.py:rewrite_article:delete_short","message":"文章字数不足已删除","data":{"article_id":article_id,"title":article.title[:50],"total_chars":total_chars,"reason":"total_chars < 1000"},"timestamp":int(time.time()*1000)}) + '\n')
+                open(_dbg, 'a').write(json.dumps({"location":"api.py:rewrite_article:delete_short","message":"文章字数不足已删除","data":{"article_id":article_id,"title":article.title[:50],"total_chars":total_chars,"reason":f"total_chars < {max_word_count}"},"timestamp":int(time.time()*1000)}) + '\n')
                 # #endregion
-                log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article_id}, title={article.title[:30]}')
+                log.info(f'文章字数不足 {max_word_count}（{total_chars} 字），直接删除: id={article_id}, title={article.title[:30]}')
                 with _write_lock:
                     Article.delete().where(Article.id == article_id).execute()
-                return {'success': True, 'message': f'文章字数不足 1000（{total_chars} 字），已自动删除', 'deleted': True}
+                return {'success': True, 'message': f'文章字数不足 {max_word_count}（{total_chars} 字），已自动删除', 'deleted': True}
 
             # 3. 调用 LLM 改写（失败自动重试最多 3 次）
             timeout = self._settings.get('timeout', 30000) / 1000  # 毫秒转秒
@@ -842,7 +1101,7 @@ class Api:
                 folder = rewrite_path
             save_path = os.path.join(folder, filename)
 
-            generate_docx(elements, save_path)
+            generate_docx(elements, save_path, source_url=article.url)
 
             # 6. 更新数据库
             with _write_lock:
@@ -887,6 +1146,7 @@ class Api:
                 return {'success': True, 'message': '没有需要改写的文章', 'success_count': 0, 'fail_count': 0}
 
             headless = self._settings.get('headless', False)
+            proxy_pool = self._settings.get('proxyPool', '')
             total = len(articles)
             success_count = 0
             fail_count = 0
@@ -919,6 +1179,16 @@ class Api:
 
                     log.info(f'批量改写 [{current}/{total}]: {article.title[:30]}')
 
+                    # 0. 无本地文件且域名不支持 → 直接删除
+                    if not (article.doc_path and os.path.isfile(article.doc_path)) and not is_supported_url(article.url):
+                        log.info(f'不支持的域名，删除文章: id={article.id}, url={article.url[:80]}')
+                        with _write_lock:
+                            db.connect(reuse_if_open=True)
+                            Article.delete().where(Article.id == article.id).execute()
+                        with counter_lock:
+                            deleted_count += 1
+                        return
+
                     # 1. 提取元素：优先读本地 docx
                     if article.doc_path and os.path.isfile(article.doc_path):
                         log.info(f'从本地 docx 读取: {article.doc_path}')
@@ -926,7 +1196,7 @@ class Api:
                     else:
                         log.info(f'本地无文件，从网页抓取: {article.url}')
                         elements = loop.run_until_complete(
-                            fetch_article_elements(article.url, headless=headless)
+                            fetch_article_elements(article.url, headless=headless, proxy_pool=proxy_pool)
                         )
 
                     # 2. 分离文字
@@ -947,14 +1217,15 @@ class Api:
                             skip_count += 1
                         return
 
-                    # 2.5. 字数不足 1000 的文章直接删除
+                    # 2.5. 字数不足的文章直接删除
                     total_chars = sum(len(p) for p in paragraphs)
-                    if total_chars < 1000:
+                    max_word_count = self._settings.get('maxWordCount', 1000)
+                    if total_chars < max_word_count:
                         # #region agent log
                         _dbg = '/Users/chaiyapeng/Documents/toutiao/.cursor/debug.log'
-                        open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:delete_short","message":"字数不足已删除","data":{"article_id":article.id,"title":article.title[:50],"total_chars":total_chars,"reason":"total_chars < 1000"},"timestamp":int(time.time()*1000)}) + '\n')
+                        open(_dbg, 'a').write(json.dumps({"location":"api.py:batch_rewrite:delete_short","message":"字数不足已删除","data":{"article_id":article.id,"title":article.title[:50],"total_chars":total_chars,"reason":f"total_chars < {max_word_count}"},"timestamp":int(time.time()*1000)}) + '\n')
                         # #endregion
-                        log.info(f'文章字数不足 1000（{total_chars} 字），直接删除: id={article.id}, title={article.title[:30]}')
+                        log.info(f'文章字数不足 {max_word_count}（{total_chars} 字），直接删除: id={article.id}, title={article.title[:30]}')
                         with _write_lock:
                             db.connect(reuse_if_open=True)
                             Article.delete().where(Article.id == article.id).execute()
@@ -1010,7 +1281,7 @@ class Api:
                         folder = rewrite_path
                     save_path = os.path.join(folder, filename)
 
-                    generate_docx(elements, save_path)
+                    generate_docx(elements, save_path, source_url=article.url)
 
                     # 6. 更新数据库
                     with _write_lock:
@@ -1092,7 +1363,60 @@ class Api:
 
             with _write_lock, db.atomic():
                 for url in raw_urls:
-                    # 提取文章 ID，支持多种头条文章 URL 格式
+                    if _is_huiwen_url(url):
+                        # 统一协议为 https，避免 http/https 重复导入
+                        url = re.sub(r'^http://', 'https://', url)
+                        if not url.startswith('http'):
+                            url = 'https://' + url.lstrip('/')
+                        # 去掉尾部查询参数后作为去重依据
+                        canonical = url.split('?')[0].rstrip('/')
+                        group_id = re.sub(r'[^\w]', '_', canonical[-60:])
+                        existing = Article.get_or_none(Article.url == url)
+                        if not existing:
+                            # 也检查 http 版本是否已存在
+                            http_url = url.replace('https://', 'http://', 1)
+                            existing = Article.get_or_none(Article.url == http_url)
+                        if existing:
+                            skipped += 1
+                            continue
+                        Article.create(
+                            group_id=group_id,
+                            title=f'待下载文章 (huiwen)',
+                            url=url,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        added += 1
+                        continue
+
+                    if _is_people_url(url):
+                        if not url.startswith('http'):
+                            url = 'http://' + url.lstrip('/')
+                        canonical = url.split('?')[0].rstrip('/')
+                        # 从 URL 提取 JSON ID，如 /n/xxx 中的 xxx
+                        people_match = re.search(r'/n/(\w+)', url)
+                        group_id = people_match.group(1) if people_match else re.sub(r'[^\w]', '_', canonical[-60:])
+                        existing = Article.get_or_none(Article.group_id == group_id)
+                        if not existing:
+                            # 也按 URL 查重（兼容 http/https）
+                            existing = Article.get_or_none(Article.url == url)
+                            if not existing:
+                                alt_url = url.replace('http://', 'https://', 1) if url.startswith('http://') else url.replace('https://', 'http://', 1)
+                                existing = Article.get_or_none(Article.url == alt_url)
+                        if existing:
+                            skipped += 1
+                            continue
+                        Article.create(
+                            group_id=group_id,
+                            title=f'待下载文章 (people)',
+                            url=url,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        added += 1
+                        continue
+
+                    # 头条文章 URL 格式
                     # https://www.toutiao.com/article/7473002025927541286/
                     # https://www.toutiao.com/a7473002025927541286/
                     # https://www.toutiao.com/i7473002025927541286/
@@ -1159,6 +1483,7 @@ class Api:
                 return {'success': False, 'message': '请先在设置中配置文章保存路径'}
 
             headless = self._settings.get('headless', False)
+            proxy_pool = self._settings.get('proxyPool', '')
 
             db.connect(reuse_if_open=True)
             articles = list(Article.select().where(
@@ -1207,6 +1532,7 @@ class Api:
                             category=article.category,
                             title=article.title,
                             headless=headless,
+                            proxy_pool=proxy_pool,
                         )
                         return doc_path
 

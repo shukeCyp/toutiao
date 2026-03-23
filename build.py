@@ -77,7 +77,7 @@ def run_pyinstaller():
         '--name', APP_NAME,
         '--noconfirm',
         '--clean',
-        '--windowed',
+        '--console',
         # 添加前端文件
         '--add-data', f'{WEB_DIR}{os.pathsep}web',
     ]

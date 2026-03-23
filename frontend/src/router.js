@@ -7,9 +7,14 @@ const routes = [
     component: () => import('./views/Home.vue'),
   },
   {
-    path: '/accounts',
-    name: 'Accounts',
-    component: () => import('./views/Accounts.vue'),
+    path: '/account-profiles',
+    name: 'AccountProfiles',
+    component: () => import('./views/AccountProfiles.vue'),
+  },
+  {
+    path: '/account-list',
+    name: 'AccountList',
+    component: () => import('./views/AccountList.vue'),
   },
   {
     path: '/articles',

@@ -7,6 +7,7 @@ import os
 import re
 import io
 import asyncio
+import random
 import requests
 from html.parser import HTMLParser
 from datetime import datetime
@@ -125,20 +126,212 @@ class ArticleContentParser(HTMLParser):
         self.elements.append({'type': 'text', 'text': text})
 
 
+class HuiwenContentParser(HTMLParser):
+    """
+    解析 feed.huiwen.co 文章 HTML（.yl-content 结构）
+    正文在 <section> > <span> 中，图片在 <div class="yl-img-wrapper"> > <img> 中，
+    底部 <p> 标签中的署名行需过滤。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.elements = []
+        self._text_buf = ''
+        self._skip_tags = {'script', 'style', 'noscript'}
+        self._skip_depth = 0
+        self._in_section = False
+        self._section_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+
+        if tag in self._skip_tags:
+            self._skip_depth += 1
+            return
+
+        if self._skip_depth > 0:
+            return
+
+        if tag == 'section':
+            if not self._in_section:
+                self._flush_text()
+                self._in_section = True
+                self._section_depth = 1
+            else:
+                self._section_depth += 1
+
+        elif tag == 'p':
+            self._flush_text()
+
+        elif tag == 'img':
+            self._flush_text()
+            url = attrs_dict.get('data-src', '') or attrs_dict.get('src', '')
+            if url and not url.startswith('data:'):
+                if url.startswith('//'):
+                    url = 'https:' + url
+                self.elements.append({'type': 'image', 'url': url})
+
+    def handle_endtag(self, tag):
+        if tag in self._skip_tags and self._skip_depth > 0:
+            self._skip_depth -= 1
+            return
+
+        if self._skip_depth > 0:
+            return
+
+        if tag == 'section' and self._in_section:
+            self._section_depth -= 1
+            if self._section_depth <= 0:
+                self._flush_text()
+                self._in_section = False
+                self._section_depth = 0
+
+        elif tag == 'p':
+            self._flush_text()
+
+    def handle_data(self, data):
+        if self._skip_depth > 0:
+            return
+        text = data.strip()
+        if text:
+            self._text_buf += text
+
+    def _flush_text(self):
+        text = self._text_buf.strip()
+        self._text_buf = ''
+        if not text:
+            return
+        text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        if not text:
+            return
+        if _SIGNATURE_PATTERN.match(text):
+            return
+        # 过滤 "声明：" 提示文字
+        if text.startswith('声明：') or text.startswith('声明:'):
+            return
+        self.elements.append({'type': 'text', 'text': text})
+
+
 def parse_article_html(html):
-    """解析文章 HTML 内容"""
+    """解析头条文章 HTML 内容"""
     parser = ArticleContentParser()
     parser.feed(html)
     parser._flush_text()
     return parser.elements
 
 
-def download_image_bytes(url, timeout=15):
+def parse_huiwen_html(html):
+    """解析 feed.huiwen.co 文章 HTML 内容"""
+    parser = HuiwenContentParser()
+    parser.feed(html)
+    parser._flush_text()
+    return parser.elements
+
+
+def _is_huiwen_url(url):
+    """判断是否为 feed.huiwen.co 域名的文章"""
+    return 'huiwen.co' in url or 'feed.huiwen' in url
+
+
+def _is_people_url(url):
+    """判断是否为 m2.people.cn 域名的文章"""
+    return 'm2.people.cn' in url or 'm.people.cn' in url
+
+
+def _get_source_type(url):
+    """根据 URL 判断文章来源类型，返回 'huiwen' / 'people' / 'toutiao'"""
+    if _is_huiwen_url(url):
+        return 'huiwen'
+    if _is_people_url(url):
+        return 'people'
+    return 'toutiao'
+
+
+_SUPPORTED_DOMAINS = [
+    'toutiao.com',
+    'huiwen.co',
+    'm2.people.cn',
+    'm.people.cn',
+]
+
+
+def is_supported_url(url):
+    """判断 URL 是否为已适配的域名，不支持的域名无法正确抓取"""
+    if not url:
+        return False
+    return any(d in url for d in _SUPPORTED_DOMAINS)
+
+
+def _get_referer(source_type):
+    """根据来源类型返回对应的 Referer"""
+    return {
+        'huiwen': 'https://feed.huiwen.co/',
+        'people': 'http://m2.people.cn/',
+        'toutiao': 'https://www.toutiao.com/',
+    }.get(source_type, 'https://www.toutiao.com/')
+
+
+def _parse_proxy_line(line):
+    """
+    解析单行代理字符串，返回 Playwright proxy dict
+    格式: IP:端口 用户名 密码
+    """
+    parts = line.strip().split()
+    if not parts:
+        return None
+    server = parts[0]
+    if not server.startswith('http'):
+        server = 'http://' + server
+    proxy = {'server': server}
+    if len(parts) >= 3:
+        proxy['username'] = parts[1]
+        proxy['password'] = parts[2]
+    return proxy
+
+
+def _check_proxy(proxy_config, timeout=8):
+    """通过代理发送请求检测是否可用，返回 True/False"""
+    try:
+        server = proxy_config['server']
+        proxies = {'http': server, 'https': server}
+        if proxy_config.get('username'):
+            auth_server = server.replace('://', f'://{proxy_config["username"]}:{proxy_config["password"]}@')
+            proxies = {'http': auth_server, 'https': auth_server}
+        resp = requests.get('http://httpbin.org/ip', proxies=proxies, timeout=timeout)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _random_proxy(proxy_pool_text):
+    """从多行代理文本中随机选取一个可用的代理，返回 Playwright proxy dict 或 None"""
+    if not proxy_pool_text or not proxy_pool_text.strip():
+        return None
+    lines = [l.strip() for l in proxy_pool_text.strip().splitlines() if l.strip()]
+    if not lines:
+        return None
+    random.shuffle(lines)
+    for line in lines:
+        proxy = _parse_proxy_line(line)
+        if not proxy:
+            continue
+        log.info(f'检测代理: {proxy["server"]}')
+        if _check_proxy(proxy):
+            log.info(f'代理可用: {proxy["server"]}')
+            return proxy
+        log.warning(f'代理不可用: {proxy["server"]}，尝试下一个')
+    log.warning('所有代理均不可用，将不使用代理')
+    return None
+
+
+def download_image_bytes(url, referer='https://www.toutiao.com/', timeout=15):
     """下载图片并返回 bytes"""
     try:
+        if url.startswith('//'):
+            url = 'https:' + url
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Referer': 'https://www.toutiao.com/',
+            'Referer': referer,
         }
         resp = requests.get(url, headers=headers, timeout=timeout)
         if resp.status_code == 200 and len(resp.content) > 500:
@@ -235,7 +428,7 @@ def _clean_text(text):
     return re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
 
 
-def generate_docx(elements, save_path):
+def generate_docx(elements, save_path, source_url=''):
     """
     根据解析后的元素列表生成纯文本 docx 文件（宋体）
 
@@ -245,6 +438,7 @@ def generate_docx(elements, save_path):
             - {'type': 'image', 'url': '...'} — 从网络下载
             - {'type': 'image', 'data': bytes} — 直接使用本地数据
         save_path: 保存文件完整路径
+        source_url: 原文链接，用于确定图片下载 Referer 和是否裁水印
     """
     doc = Document()
 
@@ -254,6 +448,10 @@ def generate_docx(elements, save_path):
     style.font.size = Pt(12)
     style._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
 
+    source_type = _get_source_type(source_url) if source_url else 'toutiao'
+    referer = _get_referer(source_type)
+    need_crop = (source_type == 'toutiao')
+
     for elem in elements:
         if elem['type'] == 'text':
             doc.add_paragraph(_clean_text(elem['text']))
@@ -261,9 +459,8 @@ def generate_docx(elements, save_path):
         elif elem['type'] == 'image':
             img_bytes = elem.get('data')  # 本地图片数据
             if not img_bytes and elem.get('url'):
-                # 从网络下载
-                img_bytes = download_image_bytes(elem['url'])
-                if img_bytes:
+                img_bytes = download_image_bytes(elem['url'], referer=referer)
+                if img_bytes and need_crop:
                     img_bytes = crop_watermark(img_bytes)
 
             if img_bytes:
@@ -282,29 +479,42 @@ def generate_docx(elements, save_path):
     return save_path
 
 
-async def fetch_article_elements(article_url, headless=True):
+async def fetch_article_elements(article_url, headless=True, proxy_pool=''):
     """
     打开文章页面，提取正文元素列表（文字段落 + 图片）
+    自动识别 toutiao.com 和 feed.huiwen.co 使用不同的选择器和解析器
 
     Args:
         article_url: 文章 URL
         headless: 是否使用无头模式
+        proxy_pool: 代理池文本（每行一个代理），为空则不使用代理
 
     Returns:
         list: [{'type': 'text', 'text': ...}, {'type': 'image', 'url': ...}, ...]
     """
-    log.info(f'提取文章内容: {article_url} (headless={headless})')
+    source_type = _get_source_type(article_url)
+    selector_map = {
+        'huiwen': '.yl-content',
+        'people': 'article',
+        'toutiao': '.article-content',
+    }
+    content_selector = selector_map[source_type]
+    log.info(f'提取文章内容: {article_url} (headless={headless}, type={source_type})')
 
+    proxy_config = _random_proxy(proxy_pool)
     fp = random_fingerprint()
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(
-        headless=headless,
-        args=[
+    launch_kwargs = {
+        'headless': headless,
+        'args': [
             '--disable-blink-features=AutomationControlled',
             '--no-first-run',
             '--disable-infobars',
         ],
-    )
+    }
+    if proxy_config:
+        launch_kwargs['proxy'] = proxy_config
+    browser = await pw.chromium.launch(**launch_kwargs)
 
     try:
         context = await browser.new_context(
@@ -319,21 +529,27 @@ async def fetch_article_elements(article_url, headless=True):
         page = await context.new_page()
 
         await page.goto(article_url, wait_until='load', timeout=30000)
+
+        # people.cn 通过 AJAX 动态加载内容，需等待 JS 执行完成
+        if source_type == 'people':
+            await page.wait_for_timeout(3000)
+
         try:
-            await page.wait_for_selector('.article-content', timeout=10000)
+            await page.wait_for_selector(content_selector, timeout=10000)
         except Exception:
-            log.warning('未找到 .article-content，尝试等待更久')
+            log.warning(f'未找到 {content_selector}，尝试等待更久')
             await page.wait_for_timeout(3000)
 
         # 滚动到底部触发懒加载图片
         await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
         await page.wait_for_timeout(2000)
 
-        html = await page.evaluate('''
-            () => {
-                const el = document.querySelector('.article-content');
+        selector_js = content_selector.replace("'", "\\'")
+        html = await page.evaluate(f'''
+            () => {{
+                const el = document.querySelector('{selector_js}');
                 return el ? el.innerHTML : '';
-            }
+            }}
         ''')
 
         await context.close()
@@ -346,7 +562,12 @@ async def fetch_article_elements(article_url, headless=True):
         raise RuntimeError('未能提取到文章内容')
 
     log.info(f'HTML 内容长度: {len(html)}')
-    elements = parse_article_html(html)
+    parser_map = {
+        'huiwen': parse_huiwen_html,
+        'people': parse_article_html,
+        'toutiao': parse_article_html,
+    }
+    elements = parser_map[source_type](html)
     log.info(f'解析到 {len(elements)} 个元素')
     return elements
 
@@ -354,7 +575,7 @@ async def fetch_article_elements(article_url, headless=True):
 class ArticleDownloader:
     """文章下载器：提取内容 -> 生成 docx"""
 
-    async def download(self, article_url, save_dir, category='', title='', headless=True):
+    async def download(self, article_url, save_dir, category='', title='', headless=True, proxy_pool=''):
         """
         下载单篇文章为 docx
 
@@ -364,11 +585,12 @@ class ArticleDownloader:
             category: 文章分类（作为子文件夹）
             title: 文章标题（作为文件名，为空则从页面提取）
             headless: 是否使用无头模式
+            proxy_pool: 代理池文本
 
         Returns:
             str: 保存的文件路径
         """
-        elements = await fetch_article_elements(article_url, headless=headless)
+        elements = await fetch_article_elements(article_url, headless=headless, proxy_pool=proxy_pool)
 
         # 如果没有传入标题，使用默认名称
         if not title:
@@ -383,6 +605,6 @@ class ArticleDownloader:
         save_path = os.path.join(folder, filename)
 
         # 生成 docx
-        generate_docx(elements, save_path)
+        generate_docx(elements, save_path, source_url=article_url)
 
         return save_path

@@ -18,6 +18,33 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <div class="setting-item setting-item-vertical">
+          <div class="setting-info">
+            <label class="setting-label">代理池</label>
+            <span class="setting-desc">每行一个代理，格式：IP:端口 用户名 密码（用户名密码可选）<br>示例：183.146.16.147:29011 user123 pass456</span>
+          </div>
+          <div class="proxy-list" v-if="proxyList.length">
+            <div class="proxy-row" v-for="(item, idx) in proxyList" :key="idx">
+              <span class="proxy-addr">{{ item.addr }}</span>
+              <span class="proxy-user" v-if="item.user">{{ item.user }}</span>
+              <button class="proxy-remove" @click="removeProxy(idx)" title="删除">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="proxy-empty" v-else>暂无代理，请在下方添加</div>
+          <div class="proxy-add">
+            <input
+              class="input proxy-add-input"
+              v-model="newProxy"
+              placeholder="183.146.16.147:29011 用户名 密码"
+              @keyup.enter="addProxy"
+            />
+            <button class="btn btn-primary btn-sm" @click="addProxy">添加</button>
+          </div>
+        </div>
       </div>
 
       <div class="card settings-section">
@@ -100,6 +127,13 @@
           </div>
           <input class="input setting-input" type="number" v-model.number="settings.rewriteWorkers" />
         </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label">文字字数限制</label>
+            <span class="setting-desc">改写文章的最大字数限制，默认 1000</span>
+          </div>
+          <input class="input setting-input" type="number" v-model.number="settings.maxWordCount" />
+        </div>
       </div>
 
       <div class="actions">
@@ -111,7 +145,7 @@
 </template>
 
 <script setup>
-import { reactive, onMounted } from 'vue'
+import { reactive, computed, ref, onMounted } from 'vue'
 import { useAppStore } from '../stores/app'
 import { useToast } from '../composables/useToast'
 
@@ -123,14 +157,44 @@ const defaultSettings = {
   timeout: 30000,
   collectTimeout: 60,
   rewriteWorkers: 10,
+  maxWordCount: 1000,
   apiBase: '',
   apiKey: '',
   model: '',
   articleSavePath: '',
   rewriteSavePath: '',
+  proxyPool: '',
 }
 
 const settings = reactive({ ...defaultSettings })
+const newProxy = ref('')
+
+const proxyList = computed(() => {
+  if (!settings.proxyPool || !settings.proxyPool.trim()) return []
+  return settings.proxyPool.trim().split('\n').filter(l => l.trim()).map(line => {
+    const parts = line.trim().split(/\s+/)
+    return { addr: parts[0] || '', user: parts[1] || '', raw: line.trim() }
+  })
+})
+
+function addProxy() {
+  const val = newProxy.value.trim()
+  if (!val) return
+  const parts = val.split(/\s+/)
+  if (!parts[0] || !parts[0].includes(':')) {
+    toast.error('格式不正确，请输入 IP:端口 用户名 密码')
+    return
+  }
+  const current = settings.proxyPool ? settings.proxyPool.trim() : ''
+  settings.proxyPool = current ? current + '\n' + val : val
+  newProxy.value = ''
+}
+
+function removeProxy(idx) {
+  const lines = settings.proxyPool.trim().split('\n').filter(l => l.trim())
+  lines.splice(idx, 1)
+  settings.proxyPool = lines.join('\n')
+}
 
 onMounted(async () => {
   const result = await appStore.callApi('get_settings')
@@ -220,6 +284,86 @@ function resetSettings() {
 
 .setting-input {
   max-width: 240px;
+}
+
+.setting-item-vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.proxy-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.proxy-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-secondary);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+}
+
+.proxy-addr {
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+
+.proxy-user {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.proxy-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.proxy-remove:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.proxy-empty {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  padding: var(--space-3) 0;
+}
+
+.proxy-add {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.proxy-add-input {
+  flex: 1;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: var(--text-xs);
+}
+
+.btn-sm {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
 }
 
 .path-input-group {
