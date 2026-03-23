@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git -C \"/Users/chaiyapeng/Documents/toutiao\" status:*)",
-      "Bash(git -C \"/Users/chaiyapeng/Documents/toutiao\" diff:*)",
-      "Bash(sqlite3 /Users/chaiyapeng/Documents/toutiao/database/toutiao.db \"PRAGMA table_info\\(accounts\\);\")"
-    ]
-  }
-}
