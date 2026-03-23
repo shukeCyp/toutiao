@@ -28,8 +28,9 @@ APP_NAME = 'ToutiaoTool'
 def build_frontend():
     """构建前端"""
     print('[BUILD] 构建前端...')
-    subprocess.check_call(['npm', 'install'], cwd=FRONTEND_DIR)
-    subprocess.check_call(['npm', 'run', 'build'], cwd=FRONTEND_DIR)
+    npm_cmd = 'npm.cmd' if platform.system() == 'Windows' else 'npm'
+    subprocess.check_call([npm_cmd, 'install'], cwd=FRONTEND_DIR)
+    subprocess.check_call([npm_cmd, 'run', 'build'], cwd=FRONTEND_DIR)
     print('[BUILD] 前端构建完成')
 
 
