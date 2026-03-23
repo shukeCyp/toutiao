@@ -10,7 +10,7 @@
 - 🔐 **账号管理** - 保存多个头条账号 Cookie，快速切换登录状态
 - 🎯 **任务管理** - 支持批量任务队列，实时查看进度和日志
 - 🌐 **代理支持** - 配置代理池，自动检测可用代理进行文章抓取
-- 🖥️ **桌面应用** - 跨平台打包为独立可执行程序（Windows/macOS）
+- 🖥️ **桌面应用** - 打包为独立可执行程序
 
 ## 项目结构
 
@@ -92,8 +92,7 @@ cd backend && python main.py
 python build.py
 
 # 输出目录: output/
-# macOS: ToutiaoTool.app + ToutiaoTool.dmg
-# Windows: ToutiaoTool.exe
+# Windows: output/ToutiaoTool/ToutiaoTool.exe
 ```
 
 ## 使用指南

@@ -10,18 +10,14 @@ import webview
 from logger import setup_logger, get_logger
 from models import init_db
 from api import Api
+from runtime_paths import get_resource_path
 
 log = get_logger('main')
 
 
 def get_web_path():
     """获取前端文件路径"""
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    web_dir = os.path.join(base_dir, 'web')
+    web_dir = get_resource_path('web')
 
     if os.path.exists(web_dir) and os.path.isfile(os.path.join(web_dir, 'index.html')):
         return web_dir

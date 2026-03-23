@@ -7,6 +7,7 @@ import base64
 from playwright.async_api import async_playwright
 from logger import get_logger
 from fingerprint import random_fingerprint
+from runtime_paths import configure_playwright_env
 
 log = get_logger('browser')
 
@@ -31,6 +32,10 @@ class BrowserManager:
         log.info(f'BrowserManager 启动 (headless={headless}, data_dir={user_data_dir})')
         if self.is_connected:
             await self.close()
+
+        bundled_browser_dir = configure_playwright_env()
+        if bundled_browser_dir:
+            log.info(f'使用内置 Playwright 浏览器目录: {bundled_browser_dir}')
 
         self._playwright = await async_playwright().start()
 

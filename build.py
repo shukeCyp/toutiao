@@ -1,7 +1,6 @@
 """
 Toutiao Tool 打包脚本
-使用 PyInstaller 打包为单文件可执行程序
-支持 Windows (.exe) 和 macOS (.app -> .dmg)
+使用 PyInstaller 打包为 onedir 目录发布包
 """
 
 import os
@@ -23,6 +22,7 @@ WEB_DIR = os.path.join(BACKEND_DIR, 'web')
 OUTPUT_DIR = os.path.join(ROOT_DIR, 'output')
 
 APP_NAME = 'ToutiaoTool'
+PLAYWRIGHT_BROWSERS_DIR = os.path.join(ROOT_DIR, 'ms-playwright')
 
 
 def build_frontend():
@@ -37,40 +37,72 @@ def build_frontend():
 def install_playwright():
     """安装 Playwright Chromium"""
     print('[BUILD] 安装 Playwright Chromium...')
-    subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium'])
-    print('[BUILD] Playwright Chromium 安装完成')
+
+    if os.path.exists(PLAYWRIGHT_BROWSERS_DIR):
+        shutil.rmtree(PLAYWRIGHT_BROWSERS_DIR)
+    os.makedirs(PLAYWRIGHT_BROWSERS_DIR, exist_ok=True)
+
+    env = os.environ.copy()
+    env['PLAYWRIGHT_BROWSERS_PATH'] = PLAYWRIGHT_BROWSERS_DIR
+    subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium'], env=env)
+
+    print(f'[BUILD] Playwright Chromium 安装完成: {PLAYWRIGHT_BROWSERS_DIR}')
 
 
 def get_playwright_browser_path():
     """获取 Playwright Chromium 浏览器路径"""
-    import playwright
-    pw_dir = os.path.dirname(playwright.__file__)
-    driver_dir = os.path.join(pw_dir, 'driver', 'package', '.local-browsers')
-
-    if not os.path.exists(driver_dir):
-        # 备选路径
-        home = os.path.expanduser('~')
-        if platform.system() == 'Darwin':
-            driver_dir = os.path.join(home, 'Library', 'Caches', 'ms-playwright')
-        elif platform.system() == 'Windows':
-            driver_dir = os.path.join(home, 'AppData', 'Local', 'ms-playwright')
-        else:
-            driver_dir = os.path.join(home, '.cache', 'ms-playwright')
-
-    if os.path.exists(driver_dir):
-        print(f'[BUILD] Playwright browsers: {driver_dir}')
-        return driver_dir
+    if os.path.exists(PLAYWRIGHT_BROWSERS_DIR):
+        print(f'[BUILD] Playwright browsers: {PLAYWRIGHT_BROWSERS_DIR}')
+        return PLAYWRIGHT_BROWSERS_DIR
 
     print('[WARN] 未找到 Playwright 浏览器目录')
     return None
 
 
+def validate_playwright_browser_path(browser_path):
+    """校验 Playwright Chromium 是否已下载到预期目录"""
+    if not browser_path or not os.path.isdir(browser_path):
+        raise RuntimeError('未找到 Playwright 浏览器目录，无法继续打包')
+
+    entries = os.listdir(browser_path)
+    if not entries:
+        raise RuntimeError(f'Playwright 浏览器目录为空: {browser_path}')
+
+    chromium_dirs = [name for name in entries if name.startswith('chromium-')]
+    if not chromium_dirs:
+        raise RuntimeError(
+            f'Playwright Chromium 未下载到预期目录: {browser_path}，当前内容: {entries}'
+        )
+
+    total_size = 0
+    for root, _, files in os.walk(browser_path):
+        for filename in files:
+            fpath = os.path.join(root, filename)
+            try:
+                total_size += os.path.getsize(fpath)
+            except OSError:
+                pass
+
+    size_mb = total_size / 1024 / 1024
+    print(f'[BUILD] Playwright 浏览器目录校验通过: {size_mb:.1f} MB')
+
+
+def get_directory_size_mb(directory):
+    """计算目录总大小（MB）"""
+    total_size = 0
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            fpath = os.path.join(root, filename)
+            try:
+                total_size += os.path.getsize(fpath)
+            except OSError:
+                pass
+    return total_size / 1024 / 1024
+
+
 def run_pyinstaller():
     """执行 PyInstaller 打包"""
     print('[BUILD] 开始 PyInstaller 打包...')
-
-    is_mac = platform.system() == 'Darwin'
-    is_win = platform.system() == 'Windows'
 
     # 收集后端所有 .py 文件作为 hidden imports
     backend_modules = []
@@ -79,16 +111,24 @@ def run_pyinstaller():
             mod = f[:-3]
             backend_modules.extend(['--hidden-import', mod])
 
+    playwright_path = get_playwright_browser_path()
+    validate_playwright_browser_path(playwright_path)
+
     cmd = [
         sys.executable, '-m', 'PyInstaller',
         '--name', APP_NAME,
         '--noconfirm',
         '--clean',
         '--console',
-        '--onefile',
+        '--onedir',
         # 添加前端文件
         '--add-data', f'{WEB_DIR}{os.pathsep}web',
+        # 收集 Playwright 所有文件
+        '--collect-all', 'playwright',
     ]
+
+    if playwright_path:
+        cmd.extend(['--add-data', f'{playwright_path}{os.pathsep}ms-playwright'])
 
     # Hidden imports
     cmd.extend(backend_modules)
@@ -108,42 +148,19 @@ def run_pyinstaller():
     cmd.extend(['--workpath', os.path.join(ROOT_DIR, 'build')])
     cmd.extend(['--specpath', ROOT_DIR])
 
-    if is_mac:
-        cmd.extend([
-            '--osx-bundle-identifier', 'com.toutiao.tool',
-        ])
-
     # 入口文件
     cmd.append(os.path.join(BACKEND_DIR, 'main.py'))
 
     print(f'[BUILD] 命令: {" ".join(cmd)}')
     subprocess.check_call(cmd)
     print('[BUILD] PyInstaller 打包完成')
-    print('[INFO] Playwright 浏览器将在首次运行时自动下载')
 
+    app_dir = os.path.join(OUTPUT_DIR, APP_NAME)
+    if os.path.isdir(app_dir):
+        app_size_mb = get_directory_size_mb(app_dir)
+        print(f'[BUILD] 发布目录大小: {app_size_mb:.1f} MB')
 
-def create_dmg():
-    """macOS: 将 .app 打包为 .dmg"""
-    app_path = os.path.join(OUTPUT_DIR, f'{APP_NAME}.app')
-    dmg_path = os.path.join(OUTPUT_DIR, f'{APP_NAME}.dmg')
-
-    if not os.path.exists(app_path):
-        print(f'[WARN] 未找到 {app_path}，跳过 DMG 创建')
-        return
-
-    if os.path.exists(dmg_path):
-        os.remove(dmg_path)
-
-    print(f'[BUILD] 创建 DMG: {dmg_path}')
-    subprocess.check_call([
-        'hdiutil', 'create',
-        '-volname', APP_NAME,
-        '-srcfolder', app_path,
-        '-ov',
-        '-format', 'UDZO',
-        dmg_path,
-    ])
-    print(f'[BUILD] DMG 创建完成: {dmg_path}')
+    print('[INFO] 已将 Playwright 浏览器目录随程序一起打包')
 
 
 def main():
