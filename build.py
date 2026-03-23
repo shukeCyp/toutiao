@@ -85,14 +85,10 @@ def run_pyinstaller():
         '--noconfirm',
         '--clean',
         '--console',
+        '--onefile',
         # 添加前端文件
         '--add-data', f'{WEB_DIR}{os.pathsep}web',
     ]
-
-    # 添加 Playwright 浏览器
-    pw_path = get_playwright_browser_path()
-    if pw_path:
-        cmd.extend(['--add-data', f'{pw_path}{os.pathsep}.local-browsers'])
 
     # Hidden imports
     cmd.extend(backend_modules)
@@ -123,6 +119,7 @@ def run_pyinstaller():
     print(f'[BUILD] 命令: {" ".join(cmd)}')
     subprocess.check_call(cmd)
     print('[BUILD] PyInstaller 打包完成')
+    print('[INFO] Playwright 浏览器将在首次运行时自动下载')
 
 
 def create_dmg():
@@ -158,9 +155,6 @@ def main():
     build_frontend()
     install_playwright()
     run_pyinstaller()
-
-    if platform.system() == 'Darwin':
-        create_dmg()
 
     print('')
     print(f'[DONE] 打包完成！输出目录: {OUTPUT_DIR}')
